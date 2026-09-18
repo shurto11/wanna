@@ -1,0 +1,11 @@
+# wannad の設定。~/wanna/config.toml に置き、`wannad --config ~/wanna/config.toml` で起動する。
+# --config を省略すると ~/.config/wanna/server.toml を読む。
+
+# tailscale0 のアドレス (100.x.x.x) か 127.0.0.1 (+ tailscale serve)。0.0.0.0 にはしない。
+bind = "127.0.0.1:8787"
+
+# 全 API で必要な Bearer token。`openssl rand -hex 32` などで作る。
+token = "change-me"
+
+# SQLite の場所。相対パスは設定ファイルからの相対。
+db = "data/wanna.db"

@@ -1,0 +1,20 @@
+{
+  "name": "wanna-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test": "node --experimental-strip-types --test src/pos.test.ts"
+  },
+  "dependencies": {
+    "idb": "^8.0.3",
+    "sortablejs": "^1.15.7"
+  },
+  "devDependencies": {
+    "@types/sortablejs": "^1.15.9",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}

@@ -1,0 +1,15 @@
+# systemd user service。~/.config/systemd/user/wannad.service に置く。
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wannad
+#   sudo loginctl enable-linger $USER   # ログインしていなくても常駐させる
+[Unit]
+Description=wanna backend (wannad)
+After=network-online.target
+
+[Service]
+ExecStart=%h/wanna/wannad --config %h/wanna/config.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

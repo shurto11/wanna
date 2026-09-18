@@ -1,0 +1,4 @@
+# TUI (wanna) の設定。~/.config/wanna/config.toml に置く。
+# 無ければローカルのみで動き、書いた時点で溜まった変更をまとめて送る。
+server = "http://100.x.x.x:8787"
+token = "change-me"

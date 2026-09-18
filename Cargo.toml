@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["core", "server", "tui", "migrate"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+wanna-core = { path = "core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v5", "v7", "serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+toml = "0.8"
+dirs = "5"
+
+[profile.release]
+strip = true

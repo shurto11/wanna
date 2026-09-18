@@ -1,0 +1,21 @@
+[package]
+name = "wanna-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "wanna"
+path = "src/main.rs"
+
+[dependencies]
+wanna-core = { workspace = true, features = ["client"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+toml.workspace = true
+dirs.workspace = true
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
