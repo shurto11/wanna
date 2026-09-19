@@ -13,7 +13,7 @@ pub enum Screen {
     Done,
 }
 
-/// 1行のテキスト入力（メモは改行も入る）
+/// 1行のテキスト入力
 #[derive(Default, Clone)]
 pub struct TextInput {
     pub text: String,
@@ -71,10 +71,12 @@ impl TextInput {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum EditField {
-    Title,
-    Notes,
+/// 外部エディタでのメモ編集の依頼。main ループが端末を明け渡して処理する
+pub struct EditorReq {
+    pub id: String,
+    pub text: String,
+    /// 編集ポップアップから開いたなら、結果をポップアップに戻す (保存はしない)
+    pub from_popup: bool,
 }
 
 pub enum Mode {
@@ -82,7 +84,7 @@ pub enum Mode {
     AddTitle(TextInput),
     AddEnergy { title: String, energy: bool },
     AddClau { title: String, energy: bool, clau: bool },
-    Edit { id: String, title: TextInput, notes: TextInput, field: EditField },
+    Edit { id: String, title: TextInput, notes: String },
     ConfirmDelete { id: String, title: String },
 }
 
@@ -97,6 +99,7 @@ pub struct App {
     pub done_list: ListState,
     pub message: Option<String>,
     pub quit: bool,
+    pub editor: Option<EditorReq>,
 
     worker: Option<Sender<ToWorker>>,
     syncing: bool,
@@ -121,6 +124,7 @@ impl App {
             done_list: ListState::default(),
             message: None,
             quit: false,
+            editor: None,
             worker,
             syncing: false,
             dirty: false,
@@ -431,36 +435,26 @@ impl App {
                 KeyCode::Tab | KeyCode::Char(' ') => Mode::AddClau { title, energy, clau: !clau },
                 _ => Mode::AddClau { title, energy, clau },
             },
-            Mode::Edit { id, mut title, mut notes, field } => {
+            Mode::Edit { id, mut title, notes } => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match (key.code, field) {
-                    (KeyCode::Esc, _) => Mode::Normal,
-                    (KeyCode::Char('s'), _) if ctrl => {
-                        self.save_edit(&id, &title.text, &notes.text);
+                match key.code {
+                    KeyCode::Esc => Mode::Normal,
+                    KeyCode::Enter => {
+                        self.save_edit(&id, &title.text, &notes);
                         Mode::Normal
                     }
-                    (KeyCode::Enter, EditField::Title) => {
-                        self.save_edit(&id, &title.text, &notes.text);
+                    KeyCode::Char('s') if ctrl => {
+                        self.save_edit(&id, &title.text, &notes);
                         Mode::Normal
                     }
-                    (KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down, f) => {
-                        let field = match f {
-                            EditField::Title => EditField::Notes,
-                            EditField::Notes => EditField::Title,
-                        };
-                        Mode::Edit { id, title, notes, field }
+                    KeyCode::Tab => {
+                        self.editor =
+                            Some(EditorReq { id: id.clone(), text: notes.clone(), from_popup: true });
+                        Mode::Edit { id, title, notes }
                     }
-                    (KeyCode::Enter, EditField::Notes) => {
-                        notes.insert('\n');
-                        Mode::Edit { id, title, notes, field }
-                    }
-                    (_, EditField::Title) => {
+                    _ => {
                         title.handle(key);
-                        Mode::Edit { id, title, notes, field }
-                    }
-                    (_, EditField::Notes) => {
-                        notes.handle(key);
-                        Mode::Edit { id, title, notes, field }
+                        Mode::Edit { id, title, notes }
                     }
                 }
             }
@@ -474,6 +468,35 @@ impl App {
                 _ => Mode::ConfirmDelete { id, title },
             },
         };
+    }
+
+    /// 外部エディタから戻ったとき
+    pub fn on_editor(&mut self, req: EditorReq, res: Result<String>) {
+        let text = match res {
+            Ok(t) => t,
+            Err(e) => {
+                self.message = Some(format!("メモを編集できませんでした: {e:#}"));
+                return;
+            }
+        };
+        if req.from_popup {
+            if let Mode::Edit { id, notes, .. } = &mut self.mode {
+                if *id == req.id {
+                    *notes = text.trim_end().to_string();
+                }
+            }
+            return;
+        }
+        let Some(w) = self.wants.iter().find(|w| w.id == req.id) else { return };
+        let title = w.title.clone();
+        self.save_edit(&req.id, &title, &text);
+    }
+
+    /// 選択中のもののメモを外部エディタで開く
+    fn edit_notes(&mut self) {
+        if let Some(w) = self.selected() {
+            self.editor = Some(EditorReq { id: w.id.clone(), text: w.notes.clone(), from_popup: false });
+        }
     }
 
     fn save_edit(&mut self, id: &str, title: &str, notes: &str) {
@@ -565,11 +588,11 @@ impl App {
                     self.mode = Mode::Edit {
                         id: w.id.clone(),
                         title: TextInput::new(&w.title),
-                        notes: TextInput::new(&w.notes),
-                        field: EditField::Title,
+                        notes: w.notes.clone(),
                     };
                 }
             }
+            KeyCode::Char('m') => self.edit_notes(),
             KeyCode::Char('t') => {
                 if let Some(w) = self.selected() {
                     let (id, title) = (w.id.clone(), w.title.clone());
@@ -612,6 +635,7 @@ impl App {
                     self.message = Some(format!("やりたいことに戻しました: {title}"));
                 }
             }
+            KeyCode::Char('m') => self.edit_notes(),
             KeyCode::Char('d') => {
                 if let Some(w) = self.selected() {
                     self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };

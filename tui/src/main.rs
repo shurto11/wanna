@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod editor;
 mod store;
 mod sync;
 mod ui;
@@ -51,6 +52,15 @@ fn run(
                     app.on_key(key);
                 }
             }
+        }
+        if let Some(req) = app.editor.take() {
+            // エディタに端末を明け渡し、戻ったら描画し直す
+            ratatui::restore();
+            let res = editor::edit(&req.text);
+            crossterm::terminal::enable_raw_mode()?;
+            crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+            terminal.clear()?;
+            app.on_editor(req, res);
         }
         while let Ok(msg) = from_sync.try_recv() {
             app.on_sync(msg);

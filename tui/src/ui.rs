@@ -1,4 +1,4 @@
-use crate::app::{App, EditField, Mode, Screen, TextInput};
+use crate::app::{App, Mode, Screen, TextInput};
 use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -109,17 +109,13 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
             ListItem::new(Line::from(spans))
         })
         .collect();
-    let count = list.len();
+    let empty = list.is_empty();
 
     let border = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(DIM) };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
-        .border_style(border)
-        .title(Span::styled(
-            format!(" {count} "),
-            if focused { Style::new().fg(ACCENT).bold() } else { Style::new().fg(DIM) },
-        ));
+        .border_style(border);
 
     let highlight = if focused {
         Style::new().bg(ACCENT).fg(Color::Black).add_modifier(Modifier::BOLD)
@@ -127,7 +123,7 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
         Style::new()
     };
     let widget = List::new(items).block(block).highlight_style(highlight);
-    if count == 0 {
+    if empty {
         f.render_widget(widget, area);
         let hint = Paragraph::new(" (なし)".fg(DIM));
         let inner = area.inner(ratatui::layout::Margin::new(1, 1));
@@ -157,19 +153,16 @@ fn draw_done(f: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    let count = done.len();
+    let empty = done.is_empty();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
-        .title(Line::from(vec![
-            Span::styled(" ▼ やったこと ", Style::new().fg(ACCENT).bold()),
-            Span::styled(format!("{count} "), Style::new().fg(DIM)),
-        ]));
+        .title(Span::styled(" ▼ やったこと ", Style::new().fg(ACCENT).bold()));
     let widget = List::new(items)
         .block(block)
         .highlight_style(Style::new().bg(ACCENT).fg(Color::Black));
-    if count == 0 {
+    if empty {
         f.render_widget(widget, area);
         f.render_widget(
             Paragraph::new("  まだありません".fg(DIM)),
@@ -226,9 +219,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => {
             let help = match app.screen {
                 Screen::Wants => {
-                    "n:追加 e:編集 t:やった d:削除 hjkl:移動 J/K:並べ替え H/L:clau E:エネルギー a:やったこと q:終了"
+                    "n:追加 e:編集 m:メモ t:やった d:削除 hjkl:移動 J/K:並べ替え H/L:clau E:エネルギー a:やったこと q:終了"
                 }
-                Screen::Done => "j/k:移動 u:やったを取り消す d:削除 a/Esc:戻る q:終了",
+                Screen::Done => "j/k:移動 m:メモ u:やったを取り消す d:削除 a/Esc:戻る q:終了",
             };
             spans.push(Span::styled(help, Style::new().fg(DIM)));
         }
@@ -279,7 +272,7 @@ fn draw_popup(f: &mut Frame, app: &App) {
             f.render_widget(block, r);
             let [line, help] =
                 Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
-            draw_input(f, "名前 ", input, line, true);
+            draw_input(f, "名前 ", input, line);
             f.render_widget(Paragraph::new("Enter:次へ  Esc:やめる".fg(DIM)), help);
         }
         Mode::AddEnergy { title, energy } => {
@@ -305,7 +298,7 @@ fn draw_popup(f: &mut Frame, app: &App) {
             ];
             f.render_widget(Paragraph::new(text).block(popup_block("追加")), r);
         }
-        Mode::Edit { title, notes, field, .. } => {
+        Mode::Edit { title, notes, .. } => {
             let r = popup_area(area, 70, 14);
             f.render_widget(Clear, r);
             let block = popup_block("編集");
@@ -317,12 +310,23 @@ fn draw_popup(f: &mut Frame, app: &App) {
                 Constraint::Length(1),
             ])
             .areas(inner);
-            draw_input(f, "名前 ", title, t, *field == EditField::Title);
-            draw_input(f, "メモ ", notes, n, *field == EditField::Notes);
-            let h = match field {
-                EditField::Title => "Enter/Ctrl+S:保存  Tab:メモへ  Esc:やめる",
-                EditField::Notes => "Ctrl+S:保存  Enter:改行  Tab:名前へ  Esc:やめる",
+            draw_input(f, "名前 ", title, t);
+            let label = "メモ ";
+            let indent = " ".repeat(label.width());
+            let notes: Vec<Line> = if notes.is_empty() {
+                vec![Line::from(vec![Span::styled(label, Style::new().fg(DIM)), "なし".fg(DIM)])]
+            } else {
+                notes
+                    .lines()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        let head = if i == 0 { label.to_string() } else { indent.clone() };
+                        Line::from(vec![Span::styled(head, Style::new().fg(DIM)), Span::raw(l.to_string())])
+                    })
+                    .collect()
             };
+            f.render_widget(Paragraph::new(notes), n);
+            let h = "Enter:保存  Tab:メモをエディタで編集  Esc:やめる";
             f.render_widget(Paragraph::new(h.fg(DIM)), help);
         }
         Mode::ConfirmDelete { title, .. } => {
@@ -337,28 +341,18 @@ fn draw_popup(f: &mut Frame, app: &App) {
     }
 }
 
-/// ラベル付きの入力欄。複数行 (メモ) にも対応し、focus ならカーソルを置く
-fn draw_input(f: &mut Frame, label: &str, input: &TextInput, area: Rect, focus: bool) {
+/// ラベル付きの1行入力欄。カーソルを置く
+fn draw_input(f: &mut Frame, label: &str, input: &TextInput, area: Rect) {
     let label_w = label.width() as u16;
-    let style = if focus { Style::new() } else { Style::new().fg(DIM) };
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, l) in input.text.split('\n').enumerate() {
-        let head = if i == 0 { label.to_string() } else { " ".repeat(label_w as usize) };
-        lines.push(Line::from(vec![
-            Span::styled(head, Style::new().fg(if focus { ACCENT } else { DIM })),
-            Span::styled(l.to_string(), style),
-        ]));
-    }
-    // カーソルの行・列。長い行はスクロールさせず、見える範囲に収める
-    let before = input.before_cursor();
-    let row = before.matches('\n').count() as u16;
-    let col = before.rsplit('\n').next().unwrap_or("").width() as u16;
-    let scroll = row.saturating_sub(area.height.saturating_sub(1));
-    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
-    if focus {
-        let x = (area.x + label_w + col).min(area.right().saturating_sub(1));
-        f.set_cursor_position(Position::new(x, area.y + row - scroll));
-    }
+    let line = Line::from(vec![
+        Span::styled(label.to_string(), Style::new().fg(ACCENT)),
+        Span::raw(input.text.clone()),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
+    // 長い行はスクロールさせず、見える範囲に収める
+    let col = input.before_cursor().width() as u16;
+    let x = (area.x + label_w + col).min(area.right().saturating_sub(1));
+    f.set_cursor_position(Position::new(x, area.y));
 }
 
 fn truncate(s: &str, max: usize) -> String {
