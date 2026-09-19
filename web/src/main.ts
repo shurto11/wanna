@@ -47,9 +47,11 @@ document.querySelector("#app")!.innerHTML = `
   </header>
 
   <section id="view-wants" class="view">
-    <div class="axis axis-top"><span>エネルギー高</span></div>
-    <div class="grid" id="grid"></div>
-    <div class="axis axis-bottom"><span>エネルギー低</span><span>clau低 → clau高</span></div>
+    <div class="plane">
+      <div class="axis axis-y" aria-hidden="true"><span class="hi">エネルギー高</span><span class="lo">エネルギー低</span></div>
+      <div class="axis axis-x" aria-hidden="true"><span class="lo">clau低</span><span class="hi">clau高</span></div>
+      <div class="grid" id="grid"></div>
+    </div>
   </section>
 
   <section id="view-done" class="view" hidden>
@@ -114,7 +116,7 @@ const lists: HTMLOListElement[] = QUADRANTS.map((q, qi) => {
     h(
       "section",
       { class: "quad", "data-q": String(qi) },
-      h("h2", {}, label(q), h("span", { class: "count" })),
+      h("h2", {}, h("span", { class: "label" }, label(q)), h("span", { class: "count" })),
       list,
       form,
     ),
@@ -240,6 +242,10 @@ function renderDone() {
       const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const undo = h("button", { class: "undo" }, "戻す");
       undo.addEventListener("click", () => patch(w.id, { done_at: null, pos: tailPos(w, w.id) }));
+      const del = h("button", { class: "del", "aria-label": `${w.title} を削除` }, "削除");
+      del.addEventListener("click", () => {
+        if (confirm(`「${w.title}」を削除しますか？`)) store.commit({ op: "delete", id: w.id });
+      });
       return h(
         "li",
         {},
@@ -247,6 +253,7 @@ function renderDone() {
         h("span", { class: "title" }, w.title),
         h("span", { class: "tag" }, label(w)),
         undo,
+        del,
       );
     }),
   );

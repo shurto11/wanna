@@ -28,9 +28,9 @@ export const QUADRANTS: Quadrant[] = [
   { energy: false, clau: true },
 ];
 
+/** 軸の値をそのまま書いた表示 (例: "エネルギー高・clau低") */
 export function label(q: Quadrant): string {
-  if (q.energy) return q.clau ? "claudeとやる" : "自分でやる";
-  return q.clau ? "流し込む" : "片手間";
+  return `エネルギー${q.energy ? "高" : "低"}・clau${q.clau ? "高" : "低"}`;
 }
 
 export const sameQuadrant = (w: Quadrant, q: Quadrant) => w.energy === q.energy && w.clau === q.clau;

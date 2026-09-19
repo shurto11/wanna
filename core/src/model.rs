@@ -94,12 +94,13 @@ impl Quadrant {
         Quadrant { energy: false, clau: true },
     ];
 
+    /// 軸の値をそのまま書いた表示 (例: "エネルギー高・clau低")
     pub fn label(&self) -> &'static str {
         match (self.energy, self.clau) {
-            (true, false) => "自分でやる",
-            (true, true) => "claudeとやる",
-            (false, false) => "片手間",
-            (false, true) => "流し込む",
+            (true, false) => "エネルギー高・clau低",
+            (true, true) => "エネルギー高・clau高",
+            (false, false) => "エネルギー低・clau低",
+            (false, true) => "エネルギー低・clau高",
         }
     }
 }
@@ -170,6 +171,6 @@ mod tests {
         assert!(!w.is_active());
         w.apply(&WantPatch { done_at: Some(None), clau: Some(true), ..Default::default() });
         assert!(w.is_active());
-        assert_eq!(w.quadrant().label(), "claudeとやる");
+        assert_eq!(w.quadrant().label(), "エネルギー高・clau高");
     }
 }

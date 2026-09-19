@@ -39,27 +39,55 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_popup(f, app);
 }
 
+/// 2×2 の区分を1つの枠に収め、中央に2軸の矢印を引く。
+/// 上がエネルギー高、右が clau高 (右上 = 高・高、左下 = 低・低)
 fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
-    let [top_label, grid, bottom_label] = Layout::vertical([
+    let frame = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(DIM));
+    let inner = frame.inner(area);
+    f.render_widget(frame, area);
+
+    let [top, row0, hgap, row1, bottom] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Min(0),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
         Constraint::Length(1),
     ])
-    .areas(area);
+    .areas(inner);
+    let cols = |r: Rect| -> [Rect; 3] {
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(1), Constraint::Fill(1)]).areas(r)
+    };
+    let axis = Style::new().fg(DIM);
 
-    f.render_widget(Paragraph::new(" エネルギー高".fg(DIM)), top_label);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            " エネルギー低".fg(DIM),
-            "      clau低 → clau高".fg(DIM),
-        ])),
-        bottom_label,
-    );
+    // 縦軸: エネルギー (上が高)
+    let [_, mid, right] = cols(top);
+    f.render_widget(Paragraph::new(Span::styled("▲", axis)), mid);
+    f.render_widget(Paragraph::new(Span::styled(" エネルギー高", axis)), right);
+    let [_, mid, right] = cols(bottom);
+    f.render_widget(Paragraph::new(Span::styled("│", axis)), mid);
+    f.render_widget(Paragraph::new(Span::styled(" エネルギー低", axis)), right);
+    for r in [row0, row1] {
+        let [_, mid, _] = cols(r);
+        let bar = vec![Line::from("│"); mid.height as usize];
+        f.render_widget(Paragraph::new(bar).style(axis), mid);
+    }
 
-    let rows = Layout::vertical([Constraint::Ratio(1, 2); 2]).split(grid);
+    // 横軸: clau度 (右が高)
+    let [left, mid, right] = cols(hgap);
+    let lo = " clau低 ";
+    let hi = "▶ clau高 ";
+    let left_line = format!("{lo}{}", "─".repeat((left.width as usize).saturating_sub(lo.width())));
+    let right_line = format!("{}{hi}", "─".repeat((right.width as usize).saturating_sub(hi.width())));
+    f.render_widget(Paragraph::new(Span::styled(left_line, axis)), left);
+    f.render_widget(Paragraph::new(Span::styled("┼", axis)), mid);
+    f.render_widget(Paragraph::new(Span::styled(right_line, axis)), right);
+
     for (qi, q) in Quadrant::ALL.iter().enumerate() {
-        let cols = Layout::horizontal([Constraint::Ratio(1, 2); 2]).split(rows[qi / 2]);
-        draw_quadrant(f, app, qi, *q, cols[qi % 2]);
+        let [l, _, r] = cols(if qi < 2 { row0 } else { row1 });
+        draw_quadrant(f, app, qi, *q, if qi % 2 == 0 { l } else { r });
     }
 }
 
@@ -88,13 +116,10 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
         .border_style(border)
-        .title(Line::from(vec![
-            Span::styled(
-                format!(" {} ", q.label()),
-                if focused { Style::new().fg(ACCENT).bold() } else { Style::new() },
-            ),
-            Span::styled(format!("{count} "), Style::new().fg(DIM)),
-        ]));
+        .title(Span::styled(
+            format!(" {count} "),
+            if focused { Style::new().fg(ACCENT).bold() } else { Style::new().fg(DIM) },
+        ));
 
     let highlight = if focused {
         Style::new().bg(ACCENT).fg(Color::Black).add_modifier(Modifier::BOLD)
@@ -203,7 +228,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 Screen::Wants => {
                     "n:追加 e:編集 t:やった d:削除 hjkl:移動 J/K:並べ替え H/L:clau E:エネルギー a:やったこと q:終了"
                 }
-                Screen::Done => "j/k:移動 u:やったを取り消す a/Esc:戻る q:終了",
+                Screen::Done => "j/k:移動 u:やったを取り消す d:削除 a/Esc:戻る q:終了",
             };
             spans.push(Span::styled(help, Style::new().fg(DIM)));
         }
@@ -271,17 +296,12 @@ fn draw_popup(f: &mut Frame, app: &App) {
         Mode::AddClau { title, energy, clau } => {
             let r = popup_area(area, 60, 7);
             f.render_widget(Clear, r);
-            let q = Quadrant { energy: *energy, clau: *clau };
             let text = vec![
                 Line::from(title.clone().bold()),
                 Line::from(""),
                 Line::from(format!("エネルギー  {}", if *energy { "高" } else { "低" }).fg(DIM)),
                 choice("clau度    ", "高", "低", *clau),
-                Line::from(vec![
-                    "h/l:切替  Enter:".fg(DIM),
-                    Span::styled(q.label(), Style::new().fg(ACCENT)),
-                    " の末尾に追加  Esc:やめる".fg(DIM),
-                ]),
+                Line::from("h/l:切替  Enter:その区分の末尾に追加  Esc:やめる".fg(DIM)),
             ];
             f.render_widget(Paragraph::new(text).block(popup_block("追加")), r);
         }

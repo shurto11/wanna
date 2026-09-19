@@ -612,6 +612,11 @@ impl App {
                     self.message = Some(format!("やりたいことに戻しました: {title}"));
                 }
             }
+            KeyCode::Char('d') => {
+                if let Some(w) = self.selected() {
+                    self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
+                }
+            }
             _ => {}
         }
     }
