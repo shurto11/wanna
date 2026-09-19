@@ -79,12 +79,27 @@ pub struct EditorReq {
     pub from_popup: bool,
 }
 
+/// 編集ポップアップ内のカーソル位置
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EditField {
+    Title,
+    Energy,
+    Clau,
+}
+
+pub struct Edit {
+    pub id: String,
+    pub title: TextInput,
+    pub energy: bool,
+    pub clau: bool,
+    pub notes: String,
+    pub field: EditField,
+}
+
 pub enum Mode {
     Normal,
-    AddTitle(TextInput),
-    AddEnergy { title: String, energy: bool },
-    AddClau { title: String, energy: bool, clau: bool },
-    Edit { id: String, title: TextInput, notes: String },
+    Add(TextInput),
+    Edit(Edit),
     ConfirmDelete { id: String, title: String },
 }
 
@@ -269,23 +284,6 @@ impl App {
         self.focus(id);
     }
 
-    /// 選択中のものを別の区分の末尾へ
-    fn move_to(&mut self, q: Quadrant) {
-        let Some(w) = self.selected() else { return };
-        if w.quadrant() == q {
-            return;
-        }
-        let id = w.id.clone();
-        let patch = WantPatch {
-            energy: Some(q.energy),
-            clau: Some(q.clau),
-            pos: Some(self.tail_pos(q)),
-            ..Default::default()
-        };
-        self.patch(&id, patch);
-        self.focus(&id);
-    }
-
     // ───────── 同期 ─────────
 
     pub fn request_sync(&mut self) {
@@ -393,68 +391,81 @@ impl App {
                 }
                 return;
             }
-            Mode::AddTitle(mut input) => match key.code {
+            Mode::Add(mut input) => match key.code {
                 KeyCode::Esc => Mode::Normal,
-                KeyCode::Enter if !input.text.trim().is_empty() => Mode::AddEnergy {
-                    title: input.text.trim().to_string(),
-                    energy: self.cur_q().energy,
-                },
-                _ => {
-                    input.handle(key);
-                    Mode::AddTitle(input)
-                }
-            },
-            Mode::AddEnergy { title, energy } => match key.code {
-                KeyCode::Esc => Mode::Normal,
-                KeyCode::Enter => Mode::AddClau { title, energy, clau: self.cur_q().clau },
-                KeyCode::Char('k' | 'h' | '1') | KeyCode::Up | KeyCode::Left => {
-                    Mode::AddEnergy { title, energy: true }
-                }
-                KeyCode::Char('j' | 'l' | '2') | KeyCode::Down | KeyCode::Right => {
-                    Mode::AddEnergy { title, energy: false }
-                }
-                KeyCode::Tab | KeyCode::Char(' ') => Mode::AddEnergy { title, energy: !energy },
-                _ => Mode::AddEnergy { title, energy },
-            },
-            Mode::AddClau { title, energy, clau } => match key.code {
-                KeyCode::Esc => Mode::Normal,
-                KeyCode::Enter => {
-                    let q = Quadrant { energy, clau };
-                    let w = Want::new(title, energy, clau, self.tail_pos(q));
+                KeyCode::Enter if !input.text.trim().is_empty() => {
+                    let q = self.cur_q();
+                    let w = Want::new(input.text.trim(), q.energy, q.clau, self.tail_pos(q));
                     let id = w.id.clone();
                     self.commit(Op::Create { want: w });
                     self.focus(&id);
                     Mode::Normal
                 }
-                KeyCode::Char('k' | 'h' | '1') | KeyCode::Up | KeyCode::Left => {
-                    Mode::AddClau { title, energy, clau: true }
+                _ => {
+                    input.handle(key);
+                    Mode::Add(input)
                 }
-                KeyCode::Char('j' | 'l' | '2') | KeyCode::Down | KeyCode::Right => {
-                    Mode::AddClau { title, energy, clau: false }
-                }
-                KeyCode::Tab | KeyCode::Char(' ') => Mode::AddClau { title, energy, clau: !clau },
-                _ => Mode::AddClau { title, energy, clau },
             },
-            Mode::Edit { id, mut title, notes } => {
+            Mode::Edit(mut e) => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                // 名前欄では文字キーは入力にまわすので、欄の移動と切り替えは他の欄だけ
+                let choosing = e.field != EditField::Title;
                 match key.code {
                     KeyCode::Esc => Mode::Normal,
                     KeyCode::Enter => {
-                        self.save_edit(&id, &title.text, &notes);
+                        self.save_edit(&e.id, &e.title.text, &e.notes, e.energy, e.clau);
                         Mode::Normal
                     }
                     KeyCode::Char('s') if ctrl => {
-                        self.save_edit(&id, &title.text, &notes);
+                        self.save_edit(&e.id, &e.title.text, &e.notes, e.energy, e.clau);
                         Mode::Normal
                     }
                     KeyCode::Tab => {
-                        self.editor =
-                            Some(EditorReq { id: id.clone(), text: notes.clone(), from_popup: true });
-                        Mode::Edit { id, title, notes }
+                        self.editor = Some(EditorReq {
+                            id: e.id.clone(),
+                            text: e.notes.clone(),
+                            from_popup: true,
+                        });
+                        Mode::Edit(e)
                     }
+
+                    // 欄の移動
+                    KeyCode::Down | KeyCode::Char('j') if choosing || key.code == KeyCode::Down => {
+                        e.field = match e.field {
+                            EditField::Title => EditField::Energy,
+                            _ => EditField::Clau,
+                        };
+                        Mode::Edit(e)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if choosing || key.code == KeyCode::Up => {
+                        e.field = match e.field {
+                            EditField::Clau => EditField::Energy,
+                            _ => EditField::Title,
+                        };
+                        Mode::Edit(e)
+                    }
+
+                    // 高低の切り替え (左が高。空白は反転)
+                    KeyCode::Char('h' | 'l' | ' ') | KeyCode::Left | KeyCode::Right
+                        if choosing =>
+                    {
+                        let v = match key.code {
+                            KeyCode::Char(' ') => None,
+                            KeyCode::Char('h') | KeyCode::Left => Some(true),
+                            _ => Some(false),
+                        };
+                        match e.field {
+                            EditField::Energy => e.energy = v.unwrap_or(!e.energy),
+                            _ => e.clau = v.unwrap_or(!e.clau),
+                        }
+                        Mode::Edit(e)
+                    }
+
                     _ => {
-                        title.handle(key);
-                        Mode::Edit { id, title, notes }
+                        if !choosing {
+                            e.title.handle(key);
+                        }
+                        Mode::Edit(e)
                     }
                 }
             }
@@ -480,16 +491,16 @@ impl App {
             }
         };
         if req.from_popup {
-            if let Mode::Edit { id, notes, .. } = &mut self.mode {
-                if *id == req.id {
-                    *notes = text.trim_end().to_string();
+            if let Mode::Edit(e) = &mut self.mode {
+                if e.id == req.id {
+                    e.notes = text.trim_end().to_string();
                 }
             }
             return;
         }
         let Some(w) = self.wants.iter().find(|w| w.id == req.id) else { return };
-        let title = w.title.clone();
-        self.save_edit(&req.id, &title, &text);
+        let (title, energy, clau) = (w.title.clone(), w.energy, w.clau);
+        self.save_edit(&req.id, &title, &text, energy, clau);
     }
 
     /// 選択中のもののメモを外部エディタで開く
@@ -499,17 +510,25 @@ impl App {
         }
     }
 
-    fn save_edit(&mut self, id: &str, title: &str, notes: &str) {
+    fn save_edit(&mut self, id: &str, title: &str, notes: &str, energy: bool, clau: bool) {
         let Some(w) = self.wants.iter().find(|w| w.id == id) else { return };
         let title = title.trim();
         let notes = notes.trim_end();
+        let q = Quadrant { energy, clau };
+        // 区分が変わるなら移動先の末尾に置く
+        let pos = (w.quadrant() != q).then(|| self.tail_pos(q));
+        let Some(w) = self.wants.iter().find(|w| w.id == id) else { return };
         let patch = WantPatch {
             title: (!title.is_empty() && title != w.title).then(|| title.to_string()),
             notes: (notes != w.notes).then(|| notes.to_string()),
+            energy: (energy != w.energy).then_some(energy),
+            clau: (clau != w.clau).then_some(clau),
+            pos,
             ..Default::default()
         };
         if patch != WantPatch::default() {
             self.patch(id, patch);
+            self.focus(id);
         }
     }
 
@@ -520,7 +539,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('a') => self.screen = Screen::Done,
-            KeyCode::Char('n') => self.mode = Mode::AddTitle(TextInput::default()),
+            KeyCode::Char('n') => self.mode = Mode::Add(TextInput::default()),
             KeyCode::Char('r') => {
                 self.message = Some("同期中…".into());
                 self.request_sync();
@@ -569,27 +588,16 @@ impl App {
                 }
             }
 
-            // 区分の移動
-            KeyCode::Char('H') => {
-                let q = Quadrant { clau: false, ..self.cur_q() };
-                self.move_to(q);
-            }
-            KeyCode::Char('L') => {
-                let q = Quadrant { clau: true, ..self.cur_q() };
-                self.move_to(q);
-            }
-            KeyCode::Char('E') => {
-                let q = Quadrant { energy: !self.cur_q().energy, ..self.cur_q() };
-                self.move_to(q);
-            }
-
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(w) = self.selected() {
-                    self.mode = Mode::Edit {
+                    self.mode = Mode::Edit(Edit {
                         id: w.id.clone(),
                         title: TextInput::new(&w.title),
+                        energy: w.energy,
+                        clau: w.clau,
                         notes: w.notes.clone(),
-                    };
+                        field: EditField::Title,
+                    });
                 }
             }
             KeyCode::Char('m') => self.edit_notes(),

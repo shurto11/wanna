@@ -1,4 +1,4 @@
-use crate::app::{App, Mode, Screen, TextInput};
+use crate::app::{App, EditField, Mode, Screen, TextInput};
 use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -219,7 +219,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => {
             let help = match app.screen {
                 Screen::Wants => {
-                    "n:追加 e:編集 m:メモ t:やった d:削除 hjkl:移動 J/K:並べ替え H/L:clau E:エネルギー a:やったこと q:終了"
+                    "n:追加 e:編集 m:メモ t:やった d:削除 hjkl:移動 J/K:並べ替え a:やったこと q:終了"
                 }
                 Screen::Done => "j/k:移動 m:メモ u:やったを取り消す d:削除 a/Esc:戻る q:終了",
             };
@@ -248,12 +248,17 @@ fn popup_block(title: &str) -> Block<'_> {
         .title(Span::styled(format!(" {title} "), Style::new().fg(ACCENT).bold()))
 }
 
-/// 2択の表示。選ばれているほうを反転
-fn choice(label: &str, a: &str, b: &str, first: bool) -> Line<'static> {
-    let on = Style::new().bg(ACCENT).fg(Color::Black).bold();
+/// 2択の表示。選ばれているほうを反転する。`focused` ならこの欄にカーソルがある
+fn choice(label: &str, a: &str, b: &str, first: bool, focused: bool) -> Line<'static> {
+    let on = if focused {
+        Style::new().bg(ACCENT).fg(Color::Black).bold()
+    } else {
+        Style::new().fg(ACCENT)
+    };
     let off = Style::new().fg(DIM);
+    let head = if focused { Style::new().fg(ACCENT).bold() } else { Style::new().fg(DIM) };
     Line::from(vec![
-        Span::raw(format!("{label}  ")),
+        Span::styled(format!("{} {label}  ", if focused { "▶" } else { " " }), head),
         Span::styled(format!(" {a} "), if first { on } else { off }),
         Span::raw(" "),
         Span::styled(format!(" {b} "), if first { off } else { on }),
@@ -264,7 +269,7 @@ fn draw_popup(f: &mut Frame, app: &App) {
     let area = f.area();
     match &app.mode {
         Mode::Normal => {}
-        Mode::AddTitle(input) => {
+        Mode::Add(input) => {
             let r = popup_area(area, 60, 5);
             f.render_widget(Clear, r);
             let block = popup_block("追加");
@@ -273,50 +278,44 @@ fn draw_popup(f: &mut Frame, app: &App) {
             let [line, help] =
                 Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
             draw_input(f, "名前 ", input, line);
-            f.render_widget(Paragraph::new("Enter:次へ  Esc:やめる".fg(DIM)), help);
+            let h = format!("Enter:「{}」に追加  Esc:やめる", app.cur_q().label());
+            f.render_widget(Paragraph::new(h.fg(DIM)), help);
         }
-        Mode::AddEnergy { title, energy } => {
-            let r = popup_area(area, 60, 6);
-            f.render_widget(Clear, r);
-            let text = vec![
-                Line::from(title.clone().bold()),
-                Line::from(""),
-                choice("エネルギー", "高", "低", *energy),
-                Line::from("h/l:切替  Enter:次へ  Esc:やめる".fg(DIM)),
-            ];
-            f.render_widget(Paragraph::new(text).block(popup_block("追加")), r);
-        }
-        Mode::AddClau { title, energy, clau } => {
-            let r = popup_area(area, 60, 7);
-            f.render_widget(Clear, r);
-            let text = vec![
-                Line::from(title.clone().bold()),
-                Line::from(""),
-                Line::from(format!("エネルギー  {}", if *energy { "高" } else { "低" }).fg(DIM)),
-                choice("clau度    ", "高", "低", *clau),
-                Line::from("h/l:切替  Enter:その区分の末尾に追加  Esc:やめる".fg(DIM)),
-            ];
-            f.render_widget(Paragraph::new(text).block(popup_block("追加")), r);
-        }
-        Mode::Edit { title, notes, .. } => {
-            let r = popup_area(area, 70, 14);
+        Mode::Edit(e) => {
+            let r = popup_area(area, 70, 16);
             f.render_widget(Clear, r);
             let block = popup_block("編集");
             let inner = block.inner(r);
             f.render_widget(block, r);
-            let [t, n, help] = Layout::vertical([
+            let [t, q, n, help] = Layout::vertical([
                 Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
             .areas(inner);
-            draw_input(f, "名前 ", title, t);
+            if e.field == EditField::Title {
+                draw_input(f, "名前 ", &e.title, t);
+            } else {
+                let line = Line::from(vec![
+                    Span::styled("名前 ", Style::new().fg(DIM)),
+                    Span::raw(e.title.text.clone()),
+                ]);
+                f.render_widget(Paragraph::new(line), t);
+            }
+            f.render_widget(
+                Paragraph::new(vec![
+                    choice("エネルギー", "高", "低", e.energy, e.field == EditField::Energy),
+                    choice("clau度    ", "高", "低", e.clau, e.field == EditField::Clau),
+                ]),
+                q,
+            );
             let label = "メモ ";
             let indent = " ".repeat(label.width());
-            let notes: Vec<Line> = if notes.is_empty() {
+            let notes: Vec<Line> = if e.notes.is_empty() {
                 vec![Line::from(vec![Span::styled(label, Style::new().fg(DIM)), "なし".fg(DIM)])]
             } else {
-                notes
+                e.notes
                     .lines()
                     .enumerate()
                     .map(|(i, l)| {
@@ -326,7 +325,7 @@ fn draw_popup(f: &mut Frame, app: &App) {
                     .collect()
             };
             f.render_widget(Paragraph::new(notes), n);
-            let h = "Enter:保存  Tab:メモをエディタで編集  Esc:やめる";
+            let h = "↑↓:欄  h/l:高低  Enter:保存  Tab:メモをエディタで編集  Esc:やめる";
             f.render_widget(Paragraph::new(h.fg(DIM)), help);
         }
         Mode::ConfirmDelete { title, .. } => {
