@@ -49,6 +49,11 @@
   box-sizing: border-box;
 }
 
+/* .field などに display を当てているので、hidden を効かせるには上書きが要る */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -114,6 +119,20 @@ button {
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
 }
 
+/* タブが3つあるので、狭い画面ではロゴを落としてタブに幅を譲る */
+@media (max-width: 560px) {
+  .bar {
+    gap: 8px;
+  }
+  .brand {
+    display: none;
+  }
+  .tabs button {
+    padding: 5px 8px;
+    font-size: 13px;
+  }
+}
+
 .conn {
   margin-left: auto;
   border: 1px solid var(--line);
@@ -154,7 +173,7 @@ button {
 /* ───────── 2×2 グリッド ───────── */
 
 /* 1つの枠の中に 2×2 を置き、区分の隙間に2軸の矢印を引く。
-   上がエネルギー高、右が clau高 (右上 = 高・高、左下 = 低・低) */
+   上が縦軸 (エネルギー / 重要度) の高、右が clau高 (右上 = 高・高、左下 = 低・低) */
 .plane {
   --gap: 34px;
   --pad: 26px;
@@ -182,7 +201,7 @@ button {
   white-space: nowrap;
 }
 
-/* 縦軸: エネルギー。枠の上端から下端まで、区分の列の隙間を通る */
+/* 縦軸。枠の上端から下端まで、区分の列の隙間を通る */
 .axis-y {
   top: 8px;
   bottom: 8px;
@@ -348,6 +367,28 @@ button {
 .has-notes {
   color: var(--muted);
   margin-left: 4px;
+}
+
+/* 次にやることの日時。過ぎているものと今日のものだけ色を変える */
+.due {
+  flex: none;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.due[data-state="over"] {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+.due[data-state="today"] {
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 .check {
@@ -585,5 +626,11 @@ dialog::backdrop {
 .hint {
   margin: 0;
   color: var(--muted);
+  font-size: 13px;
+}
+
+.error {
+  margin: -8px 0 0;
+  color: var(--danger);
   font-size: 13px;
 }

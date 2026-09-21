@@ -1,41 +1,71 @@
+/** どちらのリストのものか */
+export type Kind = "want" | "task";
+
+/** 画面上の並び */
+export const KINDS: Kind[] = ["want", "task"];
+
+/** リストの名前 */
+export const kindLabel = (k: Kind) => (k === "task" ? "Must" : "Want");
+
+/** やったことリストの名前 (kindLabel と並ぶ3つめ) */
+export const DONE_LABEL = "Done";
+
+/** 縦軸の名前 */
+export const axisLabel = (k: Kind) => (k === "task" ? "重要度" : "エネルギー");
+
+/** 日時を持てるか */
+export const hasDue = (k: Kind) => k === "task";
+
+export const otherKind = (k: Kind): Kind => (k === "task" ? "want" : "task");
+
+/** 1件。やりたいこと / 次にやること のどちらかで、kind が分ける */
 export interface Want {
   id: string;
   title: string;
   notes: string;
-  /** true = エネルギー高 */
-  energy: boolean;
+  kind: Kind;
+  /** true = 縦軸が高い (やりたいこと = エネルギー高 / 次にやること = 重要度高) */
+  axis_hi: boolean;
   /** true = clau度高 */
   clau: boolean;
   pos: string;
+  /** 日時 (due.ts の保存形式)。次にやることだけが持つ */
+  due_at: string | null;
   done_at: string | null;
   deleted: boolean;
   rev: number;
   created_at: string;
 }
 
-export type WantPatch = Partial<Pick<Want, "title" | "notes" | "energy" | "clau" | "pos" | "done_at">>;
+export type WantPatch = Partial<
+  Pick<Want, "title" | "notes" | "kind" | "axis_hi" | "clau" | "pos" | "due_at" | "done_at">
+>;
 
 export interface Quadrant {
-  energy: boolean;
+  axis_hi: boolean;
   clau: boolean;
 }
 
 /** 画面上の並び (左上, 右上, 左下, 右下) */
 export const QUADRANTS: Quadrant[] = [
-  { energy: true, clau: false },
-  { energy: true, clau: true },
-  { energy: false, clau: false },
-  { energy: false, clau: true },
+  { axis_hi: true, clau: false },
+  { axis_hi: true, clau: true },
+  { axis_hi: false, clau: false },
+  { axis_hi: false, clau: true },
 ];
 
-/** 軸の値をそのまま書いた表示 (例: "エネルギー高・clau低") */
-export function label(q: Quadrant): string {
-  return `エネルギー${q.energy ? "高" : "低"}・clau${q.clau ? "高" : "低"}`;
+/** 軸の値をそのまま書いた表示 (例: "重要度高・clau低") */
+export function label(q: Quadrant, kind: Kind): string {
+  const hi = (b: boolean) => (b ? "高" : "低");
+  return `${axisLabel(kind)}${hi(q.axis_hi)}・clau${hi(q.clau)}`;
 }
 
-export const sameQuadrant = (w: Quadrant, q: Quadrant) => w.energy === q.energy && w.clau === q.clau;
+export const sameQuadrant = (w: Quadrant, q: Quadrant) => w.axis_hi === q.axis_hi && w.clau === q.clau;
 
 export const isActive = (w: Want) => !w.deleted && w.done_at === null;
+
+/** 日時。やりたいことは持たないので常に null */
+export const dueOf = (w: Want) => (hasDue(w.kind) ? w.due_at : null);
 
 /** 区分内の表示順 (pos, id) */
 export const byPos = (a: Want, b: Want) =>

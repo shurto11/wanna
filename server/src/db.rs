@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::path::Path;
-use wanna_core::{now_rfc3339, pos, Quadrant, Want, WantPatch};
+use wanna_core::{now_rfc3339, pos, Kind, Quadrant, Want, WantPatch};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS rev_counter (
@@ -14,21 +14,24 @@ CREATE TABLE IF NOT EXISTS wants (
   id         TEXT    PRIMARY KEY,
   title      TEXT    NOT NULL,
   notes      TEXT    NOT NULL DEFAULT '',
-  energy     INTEGER NOT NULL CHECK (energy IN (0, 1)),
-  clau       INTEGER NOT NULL CHECK (clau   IN (0, 1)),
+  kind       TEXT    NOT NULL DEFAULT 'want' CHECK (kind IN ('want', 'task')),
+  axis_hi    INTEGER NOT NULL CHECK (axis_hi IN (0, 1)),
+  clau       INTEGER NOT NULL CHECK (clau    IN (0, 1)),
   pos        TEXT    NOT NULL,
+  due_at     TEXT,
   done_at    TEXT,
   deleted    INTEGER NOT NULL DEFAULT 0,
   rev        INTEGER NOT NULL,
   created_at TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_wants_rev      ON wants(rev);
-CREATE INDEX IF NOT EXISTS idx_wants_quadrant ON wants(energy, clau, pos);
-CREATE INDEX IF NOT EXISTS idx_wants_done     ON wants(done_at);
+CREATE INDEX IF NOT EXISTS idx_wants_rev  ON wants(rev);
+CREATE INDEX IF NOT EXISTS idx_wants_list ON wants(kind, axis_hi, clau, pos);
+CREATE INDEX IF NOT EXISTS idx_wants_done ON wants(done_at);
 "#;
 
-const COLUMNS: &str = "id, title, notes, energy, clau, pos, done_at, deleted, rev, created_at";
+const COLUMNS: &str =
+    "id, title, notes, kind, axis_hi, clau, pos, due_at, done_at, deleted, rev, created_at";
 
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
@@ -37,8 +40,34 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    migrate(&conn)?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
+}
+
+/// 「次にやること」を入れる前の DB を今の形にする。新規の DB では何もしない。
+fn migrate(conn: &Connection) -> Result<()> {
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(wants)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if cols.is_empty() {
+        return Ok(()); // テーブルがまだ無い
+    }
+    // 縦軸はリストによって意味が変わるので、energy から名前を付け直す
+    if cols.iter().any(|c| c == "energy") {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_wants_quadrant;
+             ALTER TABLE wants RENAME COLUMN energy TO axis_hi;",
+        )?;
+    }
+    if !cols.iter().any(|c| c == "kind") {
+        conn.execute_batch("ALTER TABLE wants ADD COLUMN kind TEXT NOT NULL DEFAULT 'want';")?;
+    }
+    if !cols.iter().any(|c| c == "due_at") {
+        conn.execute_batch("ALTER TABLE wants ADD COLUMN due_at TEXT;")?;
+    }
+    Ok(())
 }
 
 fn row_to_want(r: &Row) -> rusqlite::Result<Want> {
@@ -46,13 +75,15 @@ fn row_to_want(r: &Row) -> rusqlite::Result<Want> {
         id: r.get(0)?,
         title: r.get(1)?,
         notes: r.get(2)?,
-        energy: r.get(3)?,
-        clau: r.get(4)?,
-        pos: r.get(5)?,
-        done_at: r.get(6)?,
-        deleted: r.get(7)?,
-        rev: r.get(8)?,
-        created_at: r.get(9)?,
+        kind: Kind::from_str(&r.get::<_, String>(3)?),
+        axis_hi: r.get(4)?,
+        clau: r.get(5)?,
+        pos: r.get(6)?,
+        due_at: r.get(7)?,
+        done_at: r.get(8)?,
+        deleted: r.get(9)?,
+        rev: r.get(10)?,
+        created_at: r.get(11)?,
     })
 }
 
@@ -85,12 +116,13 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Want>> {
         .optional()?)
 }
 
-/// 区分の末尾に付ける pos（`exclude` 自身は数えない）
-fn tail_pos(conn: &Connection, q: Quadrant, exclude: &str) -> Result<String> {
+/// リスト・区分の末尾に付ける pos（`exclude` 自身は数えない）
+fn tail_pos(conn: &Connection, kind: Kind, q: Quadrant, exclude: &str) -> Result<String> {
     let last: Option<String> = conn.query_row(
         "SELECT max(pos) FROM wants
-         WHERE energy = ?1 AND clau = ?2 AND deleted = 0 AND done_at IS NULL AND id != ?3",
-        params![q.energy, q.clau, exclude],
+         WHERE kind = ?1 AND axis_hi = ?2 AND clau = ?3
+           AND deleted = 0 AND done_at IS NULL AND id != ?4",
+        params![kind.as_str(), q.axis_hi, q.clau, exclude],
         |r| r.get(0),
     )?;
     Ok(pos::between(last.as_deref(), None))
@@ -99,14 +131,26 @@ fn tail_pos(conn: &Connection, q: Quadrant, exclude: &str) -> Result<String> {
 fn write(conn: &Connection, w: &Want) -> Result<()> {
     conn.execute(
         &format!(
-            "INSERT INTO wants ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO wants ({COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
-               title = excluded.title, notes = excluded.notes,
-               energy = excluded.energy, clau = excluded.clau, pos = excluded.pos,
-               done_at = excluded.done_at, deleted = excluded.deleted, rev = excluded.rev"
+               title = excluded.title, notes = excluded.notes, kind = excluded.kind,
+               axis_hi = excluded.axis_hi, clau = excluded.clau, pos = excluded.pos,
+               due_at = excluded.due_at, done_at = excluded.done_at,
+               deleted = excluded.deleted, rev = excluded.rev"
         ),
         params![
-            w.id, w.title, w.notes, w.energy, w.clau, w.pos, w.done_at, w.deleted, w.rev,
+            w.id,
+            w.title,
+            w.notes,
+            w.kind.as_str(),
+            w.axis_hi,
+            w.clau,
+            w.pos,
+            w.due_at,
+            w.done_at,
+            w.deleted,
+            w.rev,
             w.created_at
         ],
     )?;
@@ -117,9 +161,11 @@ pub struct NewWant {
     pub id: String,
     pub title: String,
     pub notes: String,
-    pub energy: bool,
+    pub kind: Kind,
+    pub axis_hi: bool,
     pub clau: bool,
     pub pos: Option<String>,
+    pub due_at: Option<String>,
     pub done_at: Option<String>,
     pub created_at: Option<String>,
 }
@@ -128,9 +174,10 @@ pub struct NewWant {
 pub fn upsert(conn: &mut Connection, n: NewWant) -> Result<Want> {
     let tx = conn.transaction()?;
     let existing = get(&tx, &n.id)?;
+    let q = Quadrant { axis_hi: n.axis_hi, clau: n.clau };
     let pos = match n.pos {
         Some(p) => p,
-        None => tail_pos(&tx, Quadrant { energy: n.energy, clau: n.clau }, &n.id)?,
+        None => tail_pos(&tx, n.kind, q, &n.id)?,
     };
     let w = Want {
         rev: next_rev(&tx)?,
@@ -142,9 +189,12 @@ pub fn upsert(conn: &mut Connection, n: NewWant) -> Result<Want> {
         id: n.id,
         title: n.title,
         notes: n.notes,
-        energy: n.energy,
+        kind: n.kind,
+        axis_hi: n.axis_hi,
         clau: n.clau,
         pos,
+        // 日時を持てるのは「次にやること」だけ
+        due_at: n.due_at.filter(|_| n.kind.has_due()),
         done_at: n.done_at,
     };
     write(&tx, &w)?;
@@ -152,18 +202,21 @@ pub fn upsert(conn: &mut Connection, n: NewWant) -> Result<Want> {
     Ok(w)
 }
 
-/// 部分更新。区分が変わった / やったを取り消したのに pos が無ければ、行き先の末尾に付ける。
+/// 部分更新。行き先が変わった / やったを取り消したのに pos が無ければ、行き先の末尾に付ける。
 pub fn patch(conn: &mut Connection, id: &str, p: &WantPatch) -> Result<Option<Want>> {
     let tx = conn.transaction()?;
     let Some(mut w) = get(&tx, id)? else {
         return Ok(None);
     };
-    let before_q = w.quadrant();
+    let before = (w.kind, w.quadrant());
     let was_done = w.done_at.is_some();
     w.apply(p);
-    let moved = w.quadrant() != before_q || (was_done && w.done_at.is_none());
+    if !w.kind.has_due() {
+        w.due_at = None;
+    }
+    let moved = (w.kind, w.quadrant()) != before || (was_done && w.done_at.is_none());
     if moved && p.pos.is_none() {
-        w.pos = tail_pos(&tx, w.quadrant(), &w.id)?;
+        w.pos = tail_pos(&tx, w.kind, w.quadrant(), &w.id)?;
     }
     w.rev = next_rev(&tx)?;
     write(&tx, &w)?;
@@ -193,14 +246,16 @@ mod tests {
         c
     }
 
-    fn new(id: &str, energy: bool, clau: bool) -> NewWant {
+    fn new(id: &str, kind: Kind, axis_hi: bool, clau: bool) -> NewWant {
         NewWant {
             id: id.into(),
             title: id.into(),
             notes: String::new(),
-            energy,
+            kind,
+            axis_hi,
             clau,
             pos: None,
+            due_at: None,
             done_at: None,
             created_at: None,
         }
@@ -209,13 +264,13 @@ mod tests {
     #[test]
     fn crud_and_sync() {
         let mut c = mem();
-        let a = upsert(&mut c, new("a", true, false)).unwrap();
-        let b = upsert(&mut c, new("b", true, false)).unwrap();
+        let a = upsert(&mut c, new("a", Kind::Want, true, false)).unwrap();
+        let b = upsert(&mut c, new("b", Kind::Want, true, false)).unwrap();
         assert!(a.pos < b.pos);
         assert_eq!((a.rev, b.rev), (1, 2));
 
         // 再送しても重複しない
-        upsert(&mut c, new("a", true, false)).unwrap();
+        upsert(&mut c, new("a", Kind::Want, true, false)).unwrap();
         let (rev, all) = changes_since(&c, None).unwrap();
         assert_eq!((rev, all.len()), (3, 2));
 
@@ -231,8 +286,86 @@ mod tests {
         assert!(ch[1].deleted);
 
         // tombstone は再送で復活しない
-        let a = upsert(&mut c, new("a", true, false)).unwrap();
+        let a = upsert(&mut c, new("a", Kind::Want, true, false)).unwrap();
         assert!(a.deleted);
         assert!(patch(&mut c, "zzz", &p).unwrap().is_none());
+    }
+
+    #[test]
+    fn lists_have_separate_pos_spaces() {
+        let mut c = mem();
+        let w = upsert(&mut c, new("w", Kind::Want, true, false)).unwrap();
+        let t = upsert(&mut c, new("t", Kind::Task, true, false)).unwrap();
+        // 同じ区分でもリストが違えば先頭から振り直す
+        assert_eq!(w.pos, t.pos);
+
+        // リストを移すと移動先の末尾に付く
+        upsert(&mut c, new("t2", Kind::Task, true, false)).unwrap();
+        let moved = patch(&mut c, "w", &WantPatch { kind: Some(Kind::Task), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        assert_eq!(moved.kind, Kind::Task);
+        assert!(moved.pos > t.pos);
+    }
+
+    #[test]
+    fn due_is_dropped_outside_tasks() {
+        let mut c = mem();
+        let mut n = new("a", Kind::Want, true, false);
+        n.due_at = Some("2026-09-25".into());
+        // やりたいことは日時を持たない
+        assert_eq!(upsert(&mut c, n).unwrap().due_at, None);
+
+        let t = patch(
+            &mut c,
+            "a",
+            &WantPatch {
+                kind: Some(Kind::Task),
+                due_at: Some(Some("2026-09-25".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(t.due_at.as_deref(), Some("2026-09-25"));
+
+        // やりたいことに戻せば日時も落ちる
+        let w = patch(&mut c, "a", &WantPatch { kind: Some(Kind::Want), ..Default::default() })
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.due_at, None);
+    }
+
+    /// 「次にやること」を入れる前の DB がそのまま開けること
+    #[test]
+    fn migrates_an_old_database() {
+        let dir = std::env::temp_dir().join(format!("wanna-migrate-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wanna.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE rev_counter (id INTEGER PRIMARY KEY CHECK (id = 0), rev INTEGER NOT NULL);
+                 INSERT INTO rev_counter VALUES (0, 1);
+                 CREATE TABLE wants (
+                   id TEXT PRIMARY KEY, title TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                   energy INTEGER NOT NULL CHECK (energy IN (0, 1)),
+                   clau INTEGER NOT NULL CHECK (clau IN (0, 1)),
+                   pos TEXT NOT NULL, done_at TEXT, deleted INTEGER NOT NULL DEFAULT 0,
+                   rev INTEGER NOT NULL, created_at TEXT NOT NULL);
+                 CREATE INDEX idx_wants_quadrant ON wants(energy, clau, pos);
+                 INSERT INTO wants VALUES ('a', '古い1件', '', 1, 0, 'V', NULL, 0, 1, '2026-09-18T00:00:00Z');",
+            )
+            .unwrap();
+
+        let mut c = open(&path).unwrap();
+        let w = get(&c, "a").unwrap().unwrap();
+        assert_eq!((w.kind, w.axis_hi, w.due_at), (Kind::Want, true, None));
+        // 開いたあとは新しい列も普通に使える
+        let t = upsert(&mut c, new("b", Kind::Task, false, true)).unwrap();
+        assert_eq!(t.kind, Kind::Task);
+        drop(c);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

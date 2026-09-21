@@ -5,11 +5,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use wanna_core::{now_rfc3339, pos, sort_by_pos, Quadrant, Want, WantPatch};
+use wanna_core::{due, now_rfc3339, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Wants,
+    /// やりたいこと / 次にやること (どちらかは `App::kind`)
+    List,
     Done,
 }
 
@@ -83,17 +84,69 @@ pub struct EditorReq {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EditField {
     Title,
-    Energy,
+    Axis,
     Clau,
+    Due,
 }
 
 pub struct Edit {
     pub id: String,
+    pub kind: Kind,
     pub title: TextInput,
-    pub energy: bool,
+    pub axis_hi: bool,
     pub clau: bool,
+    /// 日時の入力欄 (`due` の入力形式)。次にやることだけ使う
+    pub due: TextInput,
     pub notes: String,
     pub field: EditField,
+    /// 日時が読めなかったときの説明
+    pub error: Option<String>,
+}
+
+impl Edit {
+    pub fn new(w: &Want) -> Self {
+        Self {
+            id: w.id.clone(),
+            kind: w.kind,
+            title: TextInput::new(&w.title),
+            axis_hi: w.axis_hi,
+            clau: w.clau,
+            due: TextInput::new(&w.due().map(due::to_input).unwrap_or_default()),
+            notes: w.notes.clone(),
+            field: EditField::Title,
+            error: None,
+        }
+    }
+
+    /// この1件で回れる欄。日時はリストによって出ない
+    pub fn fields(&self) -> &'static [EditField] {
+        use EditField::*;
+        if self.kind.has_due() {
+            &[Title, Axis, Clau, Due]
+        } else {
+            &[Title, Axis, Clau]
+        }
+    }
+
+    fn move_field(&mut self, down: bool) {
+        let fields = self.fields();
+        let i = fields.iter().position(|f| *f == self.field).unwrap_or(0);
+        let next = if down { (i + 1).min(fields.len() - 1) } else { i.saturating_sub(1) };
+        self.field = fields[next];
+    }
+
+    /// 文字キーを入力に回す欄か (高低を選ぶ欄では h/l などがキー操作になる)
+    fn typing(&self) -> bool {
+        matches!(self.field, EditField::Title | EditField::Due)
+    }
+
+    fn input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.field {
+            EditField::Title => Some(&mut self.title),
+            EditField::Due => Some(&mut self.due),
+            _ => None,
+        }
+    }
 }
 
 pub enum Mode {
@@ -107,10 +160,13 @@ pub struct App {
     store: Store,
     pub wants: Vec<Want>,
     pub screen: Screen,
+    /// 表示しているリスト。やったこと画面から戻る先でもある
+    pub kind: Kind,
     pub mode: Mode,
-    /// カーソルのある区分 (`Quadrant::ALL` の添字)
+    /// カーソルのある区分 (`Quadrant::ALL` の添字)。リストをまたいで持ち越す
     pub cur: usize,
-    pub lists: [ListState; 4],
+    /// リストごと・区分ごとの選択行
+    pub lists: [[ListState; 4]; 2],
     pub done_list: ListState,
     pub message: Option<String>,
     pub quit: bool,
@@ -132,7 +188,8 @@ impl App {
         let mut app = Self {
             store,
             wants,
-            screen: Screen::Wants,
+            screen: Screen::List,
+            kind: Kind::Want,
             mode: Mode::Normal,
             cur: 0,
             lists: Default::default(),
@@ -147,8 +204,10 @@ impl App {
             online: None,
             outbox_len,
         };
-        for i in 0..4 {
-            app.lists[i].select(Some(0));
+        for k in 0..2 {
+            for i in 0..4 {
+                app.lists[k][i].select(Some(0));
+            }
         }
         app.done_list.select(Some(0));
         app.request_sync();
@@ -161,15 +220,18 @@ impl App {
 
     // ───────── 表示用のリスト ─────────
 
-    /// 区分内のやりたいこと。`(pos, id)` 順
-    pub fn list(&self, q: Quadrant) -> Vec<&Want> {
-        let mut v: Vec<&Want> =
-            self.wants.iter().filter(|w| w.is_active() && w.quadrant() == q).collect();
+    /// リスト・区分の中身。`(pos, id)` 順
+    pub fn list(&self, kind: Kind, q: Quadrant) -> Vec<&Want> {
+        let mut v: Vec<&Want> = self
+            .wants
+            .iter()
+            .filter(|w| w.is_active() && w.kind == kind && w.quadrant() == q)
+            .collect();
         sort_by_pos(&mut v);
         v
     }
 
-    /// やったこと。達成日の降順
+    /// やったこと。達成日の降順 (どちらのリストのものも混ぜて並べる)
     pub fn done(&self) -> Vec<&Want> {
         let mut v: Vec<&Want> =
             self.wants.iter().filter(|w| !w.deleted && w.done_at.is_some()).collect();
@@ -181,36 +243,50 @@ impl App {
         Quadrant::ALL[self.cur]
     }
 
+    fn cur_list(&self) -> Vec<&Want> {
+        self.list(self.kind, self.cur_q())
+    }
+
     fn sel(&self) -> usize {
-        self.lists[self.cur].selected().unwrap_or(0)
+        self.lists[self.kind.index()][self.cur].selected().unwrap_or(0)
+    }
+
+    fn select(&mut self, i: usize) {
+        let (k, c) = (self.kind.index(), self.cur);
+        self.lists[k][c].select(Some(i));
     }
 
     pub fn selected(&self) -> Option<&Want> {
         match self.screen {
-            Screen::Wants => self.list(self.cur_q()).get(self.sel()).copied(),
+            Screen::List => self.cur_list().get(self.sel()).copied(),
             Screen::Done => self.done().get(self.done_list.selected().unwrap_or(0)).copied(),
         }
     }
 
     /// 選択位置をリストの範囲に収める
     fn clamp(&mut self) {
-        for i in 0..4 {
-            let len = self.list(Quadrant::ALL[i]).len();
-            let s = self.lists[i].selected().unwrap_or(0);
-            self.lists[i].select(Some(s.min(len.saturating_sub(1))));
+        for kind in Kind::ALL {
+            for i in 0..4 {
+                let len = self.list(kind, Quadrant::ALL[i]).len();
+                let s = self.lists[kind.index()][i].selected().unwrap_or(0);
+                self.lists[kind.index()][i].select(Some(s.min(len.saturating_sub(1))));
+            }
         }
         let len = self.done().len();
         let s = self.done_list.selected().unwrap_or(0);
         self.done_list.select(Some(s.min(len.saturating_sub(1))));
     }
 
-    /// `id` のある区分・行へカーソルを合わせる
+    /// `id` のあるリスト・区分・行へカーソルを合わせる
     fn focus(&mut self, id: &str) {
-        for (qi, q) in Quadrant::ALL.iter().enumerate() {
-            if let Some(i) = self.list(*q).iter().position(|w| w.id == id) {
-                self.cur = qi;
-                self.lists[qi].select(Some(i));
-                return;
+        for kind in Kind::ALL {
+            for (qi, q) in Quadrant::ALL.iter().enumerate() {
+                if let Some(i) = self.list(kind, *q).iter().position(|w| w.id == id) {
+                    self.kind = kind;
+                    self.cur = qi;
+                    self.lists[kind.index()][qi].select(Some(i));
+                    return;
+                }
             }
         }
     }
@@ -252,17 +328,17 @@ impl App {
         self.commit(Op::Patch { id: id.to_string(), patch });
     }
 
-    /// 区分の末尾に付ける pos
-    fn tail_pos(&self, q: Quadrant) -> String {
-        let list = self.list(q);
+    /// リスト・区分の末尾に付ける pos
+    fn tail_pos(&self, kind: Kind, q: Quadrant) -> String {
+        let list = self.list(kind, q);
         pos::between(list.last().map(|w| w.pos.as_str()), None)
     }
 
     /// 区分内で `id` を `to` 番目に置く。pos が重複していて挟めなければ区分全体を振り直す
     fn place(&mut self, id: &str, to: usize) {
-        let q = self.cur_q();
+        let (kind, q) = (self.kind, self.cur_q());
         let others: Vec<(String, String)> = self
-            .list(q)
+            .list(kind, q)
             .into_iter()
             .filter(|w| w.id != id)
             .map(|w| (w.id.clone(), w.pos.clone()))
@@ -282,6 +358,25 @@ impl App {
             }
         }
         self.focus(id);
+    }
+
+    /// 選択中のものをもう一方のリストへ移す。行き先の同じ区分の末尾に入る
+    fn move_to_other_list(&mut self) {
+        let Some(w) = self.selected() else { return };
+        let (id, title, q, to) = (w.id.clone(), w.title.clone(), w.quadrant(), w.kind.other());
+        let pos = self.tail_pos(to, q);
+        self.patch(
+            &id,
+            WantPatch {
+                kind: Some(to),
+                pos: Some(pos),
+                // やりたいことは日時を持たない
+                due_at: (!to.has_due()).then_some(None),
+                ..Default::default()
+            },
+        );
+        self.focus(&id);
+        self.message = Some(format!("{}へ移しました: {title}", to.label()));
     }
 
     // ───────── 同期 ─────────
@@ -366,7 +461,7 @@ impl App {
         }
         self.store.set_rev(resp.rev)?;
         self.clamp();
-        if let (Screen::Wants, Some(id)) = (self.screen, selected) {
+        if let (Screen::List, Some(id)) = (self.screen, selected) {
             if self.wants.iter().any(|w| w.id == id && w.is_active()) {
                 self.focus(&id);
             }
@@ -386,7 +481,7 @@ impl App {
             Mode::Normal => {
                 self.message = None;
                 match self.screen {
-                    Screen::Wants => self.key_wants(key),
+                    Screen::List => self.key_list(key),
                     Screen::Done => self.key_done(key),
                 }
                 return;
@@ -394,8 +489,9 @@ impl App {
             Mode::Add(mut input) => match key.code {
                 KeyCode::Esc => Mode::Normal,
                 KeyCode::Enter if !input.text.trim().is_empty() => {
-                    let q = self.cur_q();
-                    let w = Want::new(input.text.trim(), q.energy, q.clau, self.tail_pos(q));
+                    let (kind, q) = (self.kind, self.cur_q());
+                    let pos = self.tail_pos(kind, q);
+                    let w = Want::new(input.text.trim(), kind, q.axis_hi, q.clau, pos);
                     let id = w.id.clone();
                     self.commit(Op::Create { want: w });
                     self.focus(&id);
@@ -408,18 +504,23 @@ impl App {
             },
             Mode::Edit(mut e) => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                // 名前欄では文字キーは入力にまわすので、欄の移動と切り替えは他の欄だけ
-                let choosing = e.field != EditField::Title;
+                let save = key.code == KeyCode::Enter || (ctrl && key.code == KeyCode::Char('s'));
+                // 高低を選ぶ欄では文字キーをキー操作として使う
+                let choosing = !e.typing();
+                let arrow = matches!(key.code, KeyCode::Up | KeyCode::Down);
+                if save {
+                    self.mode = match self.save_edit(&e) {
+                        Ok(()) => Mode::Normal,
+                        Err(msg) => {
+                            e.error = Some(msg);
+                            e.field = EditField::Due;
+                            Mode::Edit(e)
+                        }
+                    };
+                    return;
+                }
                 match key.code {
                     KeyCode::Esc => Mode::Normal,
-                    KeyCode::Enter => {
-                        self.save_edit(&e.id, &e.title.text, &e.notes, e.energy, e.clau);
-                        Mode::Normal
-                    }
-                    KeyCode::Char('s') if ctrl => {
-                        self.save_edit(&e.id, &e.title.text, &e.notes, e.energy, e.clau);
-                        Mode::Normal
-                    }
                     KeyCode::Tab => {
                         self.editor = Some(EditorReq {
                             id: e.id.clone(),
@@ -430,18 +531,12 @@ impl App {
                     }
 
                     // 欄の移動
-                    KeyCode::Down | KeyCode::Char('j') if choosing || key.code == KeyCode::Down => {
-                        e.field = match e.field {
-                            EditField::Title => EditField::Energy,
-                            _ => EditField::Clau,
-                        };
+                    KeyCode::Down | KeyCode::Char('j') if choosing || arrow => {
+                        e.move_field(true);
                         Mode::Edit(e)
                     }
-                    KeyCode::Up | KeyCode::Char('k') if choosing || key.code == KeyCode::Up => {
-                        e.field = match e.field {
-                            EditField::Clau => EditField::Energy,
-                            _ => EditField::Title,
-                        };
+                    KeyCode::Up | KeyCode::Char('k') if choosing || arrow => {
+                        e.move_field(false);
                         Mode::Edit(e)
                     }
 
@@ -455,15 +550,17 @@ impl App {
                             _ => Some(false),
                         };
                         match e.field {
-                            EditField::Energy => e.energy = v.unwrap_or(!e.energy),
-                            _ => e.clau = v.unwrap_or(!e.clau),
+                            EditField::Clau => e.clau = v.unwrap_or(!e.clau),
+                            _ => e.axis_hi = v.unwrap_or(!e.axis_hi),
                         }
                         Mode::Edit(e)
                     }
 
                     _ => {
-                        if !choosing {
-                            e.title.handle(key);
+                        if let Some(input) = e.input_mut() {
+                            if input.handle(key) {
+                                e.error = None;
+                            }
                         }
                         Mode::Edit(e)
                     }
@@ -499,8 +596,8 @@ impl App {
             return;
         }
         let Some(w) = self.wants.iter().find(|w| w.id == req.id) else { return };
-        let (title, energy, clau) = (w.title.clone(), w.energy, w.clau);
-        self.save_edit(&req.id, &title, &text, energy, clau);
+        let (title, axis_hi, clau, due) = (w.title.clone(), w.axis_hi, w.clau, w.due_at.clone());
+        self.apply_edit(&req.id, &title, &text, axis_hi, clau, due);
     }
 
     /// 選択中のもののメモを外部エディタで開く
@@ -510,20 +607,40 @@ impl App {
         }
     }
 
-    fn save_edit(&mut self, id: &str, title: &str, notes: &str, energy: bool, clau: bool) {
+    /// 編集ポップアップの内容を保存する。日時が読めなければ理由を返す
+    fn save_edit(&mut self, e: &Edit) -> Result<(), String> {
+        let due = if e.kind.has_due() {
+            due::parse_input(&e.due.text, chrono::Local::now().naive_local())?
+        } else {
+            None
+        };
+        self.apply_edit(&e.id, &e.title.text, &e.notes, e.axis_hi, e.clau, due);
+        Ok(())
+    }
+
+    fn apply_edit(
+        &mut self,
+        id: &str,
+        title: &str,
+        notes: &str,
+        axis_hi: bool,
+        clau: bool,
+        due: Option<String>,
+    ) {
         let Some(w) = self.wants.iter().find(|w| w.id == id) else { return };
         let title = title.trim();
         let notes = notes.trim_end();
-        let q = Quadrant { energy, clau };
+        let q = Quadrant { axis_hi, clau };
+        let cur = (w.kind, w.title.clone(), w.notes.clone(), w.axis_hi, w.clau, w.due_at.clone());
         // 区分が変わるなら移動先の末尾に置く
-        let pos = (w.quadrant() != q).then(|| self.tail_pos(q));
-        let Some(w) = self.wants.iter().find(|w| w.id == id) else { return };
+        let pos = (w.quadrant() != q).then(|| self.tail_pos(cur.0, q));
         let patch = WantPatch {
-            title: (!title.is_empty() && title != w.title).then(|| title.to_string()),
-            notes: (notes != w.notes).then(|| notes.to_string()),
-            energy: (energy != w.energy).then_some(energy),
-            clau: (clau != w.clau).then_some(clau),
+            title: (!title.is_empty() && title != cur.1).then(|| title.to_string()),
+            notes: (notes != cur.2).then(|| notes.to_string()),
+            axis_hi: (axis_hi != cur.3).then_some(axis_hi),
+            clau: (clau != cur.4).then_some(clau),
             pos,
+            due_at: (due != cur.5).then_some(due),
             ..Default::default()
         };
         if patch != WantPatch::default() {
@@ -532,13 +649,45 @@ impl App {
         }
     }
 
-    fn key_wants(&mut self, key: KeyEvent) {
-        let len = self.list(self.cur_q()).len();
+    fn open_edit(&mut self, field: EditField) {
+        let Some(w) = self.selected() else { return };
+        let mut e = Edit::new(w);
+        if e.fields().contains(&field) {
+            e.field = field;
+        } else {
+            self.message = Some(format!("日時を持てるのは「{}」だけです", Kind::Task.label()));
+        }
+        self.mode = Mode::Edit(e);
+    }
+
+    /// 表示を Want → Must → Done の順に回す
+    fn cycle_view(&mut self, forward: bool) {
+        let cur = match self.screen {
+            Screen::List => self.kind.index(),
+            Screen::Done => 2,
+        };
+        match (cur + if forward { 1 } else { 2 }) % 3 {
+            0 => {
+                self.screen = Screen::List;
+                self.kind = Kind::Want;
+            }
+            1 => {
+                self.screen = Screen::List;
+                self.kind = Kind::Task;
+            }
+            _ => self.screen = Screen::Done,
+        }
+    }
+
+    fn key_list(&mut self, key: KeyEvent) {
+        let len = self.cur_list().len();
         let sel = self.sel();
         let top = self.cur < 2;
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Char('a') => self.screen = Screen::Done,
+            // 画面の切り替え
+            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
+            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
             KeyCode::Char('n') => self.mode = Mode::Add(TextInput::default()),
             KeyCode::Char('r') => {
                 self.message = Some("同期中…".into());
@@ -548,31 +697,29 @@ impl App {
             // カーソル移動。j/k は区分内、端まで来たら上下の区分へ抜ける
             KeyCode::Char('j') | KeyCode::Down => {
                 if sel + 1 < len {
-                    self.lists[self.cur].select(Some(sel + 1));
+                    self.select(sel + 1);
                 } else if top {
                     self.cur += 2;
-                    self.lists[self.cur].select(Some(0));
+                    self.select(0);
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if sel > 0 {
-                    self.lists[self.cur].select(Some(sel - 1));
+                    self.select(sel - 1);
                 } else if !top {
                     self.cur -= 2;
-                    let len = self.list(self.cur_q()).len();
-                    self.lists[self.cur].select(Some(len.saturating_sub(1)));
+                    let len = self.cur_list().len();
+                    self.select(len.saturating_sub(1));
                 }
             }
             KeyCode::Char('h') | KeyCode::Left => self.cur &= !1,
             KeyCode::Char('l') | KeyCode::Right => self.cur |= 1,
-            KeyCode::Char('g') | KeyCode::Home => self.lists[self.cur].select(Some(0)),
-            KeyCode::Char('G') | KeyCode::End => {
-                self.lists[self.cur].select(Some(len.saturating_sub(1)))
-            }
+            KeyCode::Char('g') | KeyCode::Home => self.select(0),
+            KeyCode::Char('G') | KeyCode::End => self.select(len.saturating_sub(1)),
             KeyCode::Char(c @ '0'..='9') => {
                 let i = if c == '0' { 9 } else { c as usize - '1' as usize };
                 if i < len {
-                    self.lists[self.cur].select(Some(i));
+                    self.select(i);
                 }
             }
 
@@ -587,19 +734,10 @@ impl App {
                     self.place(&id, sel + 1);
                 }
             }
+            KeyCode::Char('X') => self.move_to_other_list(),
 
-            KeyCode::Char('e') | KeyCode::Enter => {
-                if let Some(w) = self.selected() {
-                    self.mode = Mode::Edit(Edit {
-                        id: w.id.clone(),
-                        title: TextInput::new(&w.title),
-                        energy: w.energy,
-                        clau: w.clau,
-                        notes: w.notes.clone(),
-                        field: EditField::Title,
-                    });
-                }
-            }
+            KeyCode::Char('e') | KeyCode::Enter => self.open_edit(EditField::Title),
+            KeyCode::Char('D') => self.open_edit(EditField::Due),
             KeyCode::Char('m') => self.edit_notes(),
             KeyCode::Char('t') => {
                 if let Some(w) = self.selected() {
@@ -621,7 +759,10 @@ impl App {
         let len = self.done().len();
         let sel = self.done_list.selected().unwrap_or(0);
         match key.code {
-            KeyCode::Char('a') | KeyCode::Esc => self.screen = Screen::Wants,
+            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
+            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
+            // 直前に見ていたリストへ戻る
+            KeyCode::Esc => self.screen = Screen::List,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down if sel + 1 < len => {
                 self.done_list.select(Some(sel + 1))
@@ -633,14 +774,15 @@ impl App {
             }
             KeyCode::Char('u') => {
                 if let Some(w) = self.selected() {
-                    let (id, title, q) = (w.id.clone(), w.title.clone(), w.quadrant());
+                    let (id, title, kind, q) =
+                        (w.id.clone(), w.title.clone(), w.kind, w.quadrant());
                     let patch = WantPatch {
                         done_at: Some(None),
-                        pos: Some(self.tail_pos(q)),
+                        pos: Some(self.tail_pos(kind, q)),
                         ..Default::default()
                     };
                     self.patch(&id, patch);
-                    self.message = Some(format!("やりたいことに戻しました: {title}"));
+                    self.message = Some(format!("{}に戻しました: {title}", kind.label()));
                 }
             }
             KeyCode::Char('m') => self.edit_notes(),

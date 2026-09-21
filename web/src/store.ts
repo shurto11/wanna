@@ -3,7 +3,7 @@
 
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import { Api, Rejected } from "./api.ts";
-import { opId, type Op, type Want } from "./model.ts";
+import { opId, type Op, type Want, type WantPatch } from "./model.ts";
 
 interface Schema extends DBSchema {
   wants: { key: string; value: Want };
@@ -12,6 +12,24 @@ interface Schema extends DBSchema {
 }
 
 export type Conn = "local" | "connecting" | "online" | "offline" | "unauthorized";
+
+/** 「次にやること」を入れる前に保存したもの */
+type LegacyWant = Omit<Want, "kind" | "axis_hi" | "due_at"> & { energy?: boolean };
+
+/** 保存したものを今の形にする。どれもやりたいことで、日時は持っていない */
+function upgradeWant(old: Want): Want {
+  const { energy, ...rest } = old as unknown as LegacyWant;
+  return { kind: "want", axis_hi: !!energy, due_at: null, ...rest };
+}
+
+function upgradeOp(old: Op): Op {
+  if (old.op === "create") return { op: "create", want: upgradeWant(old.want) };
+  if (old.op === "patch") {
+    const { energy, ...patch } = old.patch as WantPatch & { energy?: boolean };
+    return { op: "patch", id: old.id, patch: energy === undefined ? patch : { ...patch, axis_hi: energy } };
+  }
+  return old;
+}
 
 export class Store {
   wants = new Map<string, Want>();
@@ -27,11 +45,24 @@ export class Store {
   private constructor(private db: IDBPDatabase<Schema>) {}
 
   static async open(): Promise<Store> {
-    const db = await openDB<Schema>("wanna", 1, {
-      upgrade(db) {
-        db.createObjectStore("wants", { keyPath: "id" });
-        db.createObjectStore("outbox", { autoIncrement: true });
-        db.createObjectStore("meta");
+    const db = await openDB<Schema>("wanna", 2, {
+      async upgrade(db, from, _to, tx) {
+        if (from < 1) {
+          db.createObjectStore("wants", { keyPath: "id" });
+          db.createObjectStore("outbox", { autoIncrement: true });
+          db.createObjectStore("meta");
+        }
+        if (from === 1) {
+          // 縦軸はリストによって意味が変わるので energy から名前を付け直した。
+          // サーバーから取り直せば済むが、未送信のものは手元にしかないので両方直す
+          const wants = tx.objectStore("wants");
+          for (const w of await wants.getAll()) await wants.put(upgradeWant(w));
+          let cur = await tx.objectStore("outbox").openCursor();
+          while (cur) {
+            await cur.update(upgradeOp(cur.value));
+            cur = await cur.continue();
+          }
+        }
       },
     });
     const s = new Store(db);

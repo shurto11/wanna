@@ -26,7 +26,7 @@ use std::{
 };
 use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
-use wanna_core::{Want, WantPatch};
+use wanna_core::{due, Kind, Want, WantPatch};
 
 static WEB: Dir = include_dir!("$CARGO_MANIFEST_DIR/../web/dist");
 
@@ -147,6 +147,11 @@ fn valid_pos(p: &str) -> bool {
     !p.is_empty() && !p.ends_with('0') && p.bytes().all(|c| c.is_ascii_alphanumeric())
 }
 
+/// 日時は `YYYY-MM-DD` か RFC3339。読めない文字列を入れさせない
+fn valid_due(d: &Option<String>) -> bool {
+    d.as_deref().is_none_or(due::valid)
+}
+
 #[derive(Deserialize)]
 struct SyncQuery {
     since: Option<i64>,
@@ -163,10 +168,15 @@ struct CreateBody {
     title: String,
     #[serde(default)]
     notes: String,
-    energy: bool,
+    #[serde(default)]
+    kind: Kind,
+    #[serde(alias = "energy")]
+    axis_hi: bool,
     clau: bool,
     #[serde(default)]
     pos: Option<String>,
+    #[serde(default)]
+    due_at: Option<String>,
     #[serde(default)]
     done_at: Option<String>,
     #[serde(default)]
@@ -181,15 +191,20 @@ async fn create(State(st): State<Shared>, Json(b): Json<CreateBody>) -> ApiResul
     if b.id.is_empty() || b.id.len() > 64 {
         return Ok(bad_request("invalid id"));
     }
+    if !valid_due(&b.due_at) {
+        return Ok(bad_request("invalid due_at"));
+    }
     let w = db::upsert(
         &mut st.db.lock().unwrap(),
         db::NewWant {
             id: b.id,
             title: b.title,
             notes: b.notes,
-            energy: b.energy,
+            kind: b.kind,
+            axis_hi: b.axis_hi,
             clau: b.clau,
             pos,
+            due_at: b.due_at,
             done_at: b.done_at,
             created_at: b.created_at,
         },
@@ -205,6 +220,9 @@ async fn update(
 ) -> ApiResult<Response> {
     if p.pos.as_deref().is_some_and(|p| !valid_pos(p)) {
         return Ok(bad_request("invalid pos"));
+    }
+    if !p.due_at.as_ref().is_none_or(valid_due) {
+        return Ok(bad_request("invalid due_at"));
     }
     let w: Option<Want> = db::patch(&mut st.db.lock().unwrap(), &id, &p)?;
     Ok(match w {

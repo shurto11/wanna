@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use wanna_core::{pos, Quadrant, Want};
+use wanna_core::{pos, Kind, Quadrant, Want};
 
 /// notes 末尾に埋め込んでいた旧メタデータ行のマーカー
 const META_MARKER: &str = "[todo-meta]";
@@ -242,20 +242,23 @@ fn main() -> Result<()> {
         }
         let (notes, inline_meta) = split_notes(t.notes.as_deref().unwrap_or(""));
         let meta = local_meta.get(&t.id).copied().or(inline_meta);
-        let (energy, clau) = match meta {
+        let (axis_hi, clau) = match meta {
             Some(m) => (m.imp >= args.threshold, m.clau >= args.threshold),
             None => (false, false),
         };
         let done_at = (t.status.as_deref() == Some("completed"))
             .then(|| t.completed.clone().unwrap_or_else(wanna_core::now_rfc3339));
         let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, format!("gtasks:{}", t.id).as_bytes());
-        by_q.entry(Quadrant { energy, clau }).or_default().push(Want {
+        by_q.entry(Quadrant { axis_hi, clau }).or_default().push(Want {
             id: id.to_string(),
             title,
             notes,
-            energy,
+            // 移行するのは「やりたいこと」だけ。次にやることは wanna の上で作る
+            kind: Kind::Want,
+            axis_hi,
             clau,
             pos: String::new(),
+            due_at: None,
             done_at,
             deleted: false,
             rev: 0,
@@ -271,14 +274,14 @@ fn main() -> Result<()> {
             w.pos = p;
         }
         let done = ws.iter().filter(|w| w.done_at.is_some()).count();
-        println!("{:<14} やりたいこと {:>3} / やったこと {:>3}", q.label(), ws.len() - done, done);
+        println!("{:<14} やりたいこと {:>3} / やったこと {:>3}", q.label(Kind::Want), ws.len() - done, done);
         all.extend(ws);
     }
     println!("スキップ (削除済み・無題): {skipped}");
 
     if args.dry_run {
         for w in &all {
-            let q = w.quadrant().label();
+            let q = w.quadrant_label();
             let mark = if w.done_at.is_some() { "✓" } else { " " };
             println!("  {mark} [{q}] {}", w.title);
         }
