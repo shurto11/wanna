@@ -1,6 +1,7 @@
 //! wanna — やりたいことリストの TUI クライアント
 
 mod app;
+mod cli;
 mod config;
 mod editor;
 mod store;
@@ -13,6 +14,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        return cli::run(&args);
+    }
     let cfg = config::Config::load();
     let store = store::Store::open(&config::config_dir().join("cache.db"))?;
 

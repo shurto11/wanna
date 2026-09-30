@@ -25,6 +25,18 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
+/// `expect_rev` が合わなかった。中身はサーバー上の今の1件
+#[derive(Debug)]
+pub struct Conflict(pub Box<Want>);
+
+impl std::fmt::Display for Conflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "他で書き換えられていました (rev {})", self.0.rev)
+    }
+}
+
+impl std::error::Error for Conflict {}
+
 impl Client {
     pub fn new(base: &str, token: &str) -> Result<Self> {
         Ok(Self {
@@ -44,6 +56,9 @@ impl Client {
     fn send(&self, req: RequestBuilder) -> Result<Response> {
         let res = req.bearer_auth(&self.token).send()?;
         let status = res.status();
+        if status == reqwest::StatusCode::CONFLICT {
+            return Err(Conflict(Box::new(res.json()?)).into());
+        }
         if status.is_client_error() {
             let body = res.text().unwrap_or_default();
             return Err(Rejected(format!("{status} {body}")).into());

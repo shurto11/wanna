@@ -224,7 +224,15 @@ async fn update(
     if !p.due_at.as_ref().is_none_or(valid_due) {
         return Ok(bad_request("invalid due_at"));
     }
-    let w: Option<Want> = db::patch(&mut st.db.lock().unwrap(), &id, &p)?;
+    let mut conn = st.db.lock().unwrap();
+    // 読んでから書き戻す間に誰かが書いていたら、今の中身を返して読み直してもらう
+    if let Some(expect) = p.expect_rev {
+        if let Some(cur) = db::get(&conn, &id)?.filter(|w| w.rev != expect) {
+            return Ok((StatusCode::CONFLICT, Json(cur)).into_response());
+        }
+    }
+    let w: Option<Want> = db::patch(&mut conn, &id, &p)?;
+    drop(conn);
     Ok(match w {
         Some(w) => {
             notify(&st, w.rev);

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use wanna_core::{due, now_rfc3339, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
+use wanna_core::{due, notes, now_rfc3339, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -524,7 +524,7 @@ impl App {
                     KeyCode::Tab => {
                         self.editor = Some(EditorReq {
                             id: e.id.clone(),
-                            text: e.notes.clone(),
+                            text: draft(&e.notes),
                             from_popup: true,
                         });
                         Mode::Edit(e)
@@ -581,6 +581,8 @@ impl App {
     /// 外部エディタから戻ったとき
     pub fn on_editor(&mut self, req: EditorReq, res: Result<String>) {
         let text = match res {
+            // テンプレートのまま閉じたら何も書かなかったことにする
+            Ok(t) if notes::is_blank(&t) => String::new(),
             Ok(t) => t,
             Err(e) => {
                 self.message = Some(format!("メモを編集できませんでした: {e:#}"));
@@ -603,7 +605,7 @@ impl App {
     /// 選択中のもののメモを外部エディタで開く
     fn edit_notes(&mut self) {
         if let Some(w) = self.selected() {
-            self.editor = Some(EditorReq { id: w.id.clone(), text: w.notes.clone(), from_popup: false });
+            self.editor = Some(EditorReq { id: w.id.clone(), text: draft(&w.notes), from_popup: false });
         }
     }
 
@@ -793,5 +795,14 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+/// エディタで開く中身。空ならテンプレートを入れておく
+fn draft(notes: &str) -> String {
+    if notes.is_empty() {
+        notes::template()
+    } else {
+        notes.to_string()
     }
 }

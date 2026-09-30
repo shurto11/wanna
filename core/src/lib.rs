@@ -2,6 +2,7 @@
 
 pub mod due;
 pub mod model;
+pub mod notes;
 pub mod pos;
 
 #[cfg(feature = "client")]

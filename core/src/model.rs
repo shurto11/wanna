@@ -222,6 +222,9 @@ pub struct WantPatch {
         deserialize_with = "double_option"
     )]
     pub done_at: Option<Option<String>>,
+    /// 書き込み時点の rev がこれでなければサーバーは 409 を返す (読んで書き戻す人向け)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_rev: Option<i64>,
 }
 
 fn double_option<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
