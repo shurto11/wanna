@@ -284,7 +284,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => {
             let help = match (app.screen, app.kind) {
                 (Screen::List, Kind::Task) => {
-                    "[/]:切替 n:追加 e:編集 D:日時 m:メモ t:やった d:削除 J/K:並べ替え X:Wantへ q:終了"
+                    "[/]:切替 n:追加 e:編集 s:日時 m:メモ t:やった d:削除 J/K:並べ替え X:Wantへ q:終了"
                 }
                 (Screen::List, Kind::Want) => {
                     "[/]:切替 n:追加 e:編集 m:メモ t:やった d:削除 hjkl:移動 J/K:並べ替え X:Mustへ q:終了"

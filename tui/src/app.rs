@@ -645,9 +645,30 @@ impl App {
             due_at: (due != cur.5).then_some(due),
             ..Default::default()
         };
+        let reorder = patch.due_at.as_ref().is_some_and(|d| d.is_some());
         if patch != WantPatch::default() {
             self.patch(id, patch);
             self.focus(id);
+        }
+        if reorder {
+            self.place_by_due(id);
+        }
+    }
+
+    /// 日時の順になる位置へ置く。自分より後の日時のものの直前、なければ日時を持つものの最後の後ろ。
+    /// 日時を持たないものの位置は気にしない
+    fn place_by_due(&mut self, id: &str) {
+        let at = |w: &Want| w.due().and_then(due::at);
+        let Some(t) = self.wants.iter().find(|w| w.id == id).and_then(at) else { return };
+        self.focus(id);
+        let others: Vec<&Want> = self.cur_list().into_iter().filter(|w| w.id != id).collect();
+        let to = others
+            .iter()
+            .position(|w| at(w).is_some_and(|x| x > t))
+            .or_else(|| others.iter().rposition(|w| at(w).is_some()).map(|i| i + 1));
+        let cur = self.sel();
+        if let Some(to) = to.filter(|&to| to != cur) {
+            self.place(id, to);
         }
     }
 
@@ -739,7 +760,7 @@ impl App {
             KeyCode::Char('X') => self.move_to_other_list(),
 
             KeyCode::Char('e') | KeyCode::Enter => self.open_edit(EditField::Title),
-            KeyCode::Char('D') => self.open_edit(EditField::Due),
+            KeyCode::Char('s') => self.open_edit(EditField::Due),
             KeyCode::Char('m') => self.edit_notes(),
             KeyCode::Char('t') => {
                 if let Some(w) = self.selected() {
