@@ -2,6 +2,7 @@ import Sortable from "sortablejs";
 import { after, between } from "./pos.ts";
 import * as due from "./due.ts";
 import {
+  ARCHIVE_LABEL,
   DONE_LABEL,
   KINDS,
   QUADRANTS,
@@ -10,6 +11,7 @@ import {
   dueOf,
   hasDue,
   isActive,
+  isArchived,
   kindLabel,
   label,
   nowRfc3339,
@@ -51,12 +53,17 @@ document.querySelector("#app")!.innerHTML = `
       <button role="tab" data-view="want" aria-selected="true">${kindLabel("want")}</button>
       <button role="tab" data-view="task" aria-selected="false">${kindLabel("task")}</button>
       <button role="tab" data-view="done" aria-selected="false">${DONE_LABEL}</button>
+      <button role="tab" data-view="archive" aria-selected="false">${ARCHIVE_LABEL}</button>
     </nav>
     <button class="conn" id="conn" title="同期の設定"></button>
   </header>
 
   <section id="view-done" class="view" hidden>
     <ol class="done-list" id="done-list"></ol>
+  </section>
+
+  <section id="view-archive" class="view" hidden>
+    <ol class="done-list" id="archive-list"></ol>
   </section>
 
   <dialog id="editor">
@@ -85,6 +92,7 @@ document.querySelector("#app")!.innerHTML = `
       <div class="actions">
         <button type="button" class="danger" data-act="delete">削除</button>
         <span class="spacer"></span>
+        <button type="button" data-act="archive" title="やってないが、リストに置くほどでもなくなった">しまう</button>
         <button type="button" data-act="done">やった</button>
         <button value="cancel" formnovalidate>閉じる</button>
         <button value="save" class="primary">保存</button>
@@ -204,6 +212,7 @@ function add(title: string, kind: Kind, q: Quadrant) {
       pos: tailPos(kind, q),
       due_at: null,
       done_at: null,
+      archived_at: null,
       deleted: false,
       rev: 0,
       created_at: nowRfc3339(),
@@ -269,24 +278,33 @@ function renderPlane(kind: Kind) {
   });
 }
 
-// ───────── やったこと ─────────
+// ───────── やったこと / 保管庫 ─────────
 
 const doneList = $<HTMLOListElement>("#done-list");
+const archiveList = $<HTMLOListElement>("#archive-list");
 
-function renderDone() {
-  const done = [...store.wants.values()]
-    .filter((w) => !w.deleted && w.done_at !== null)
-    .sort((a, b) => (a.done_at! < b.done_at! ? 1 : a.done_at! > b.done_at! ? -1 : 0));
-  if (done.length === 0) {
-    doneList.replaceChildren(h("li", { class: "empty" }, "まだありません"));
+/** やったこと / 保管庫 を日付の降順で出す。日付はやった日 / しまった日 */
+function renderPast(list: HTMLOListElement, items: Want[], at: (w: Want) => string, archive: boolean) {
+  items.sort((a, b) => (at(a) < at(b) ? 1 : at(a) > at(b) ? -1 : 0));
+  if (items.length === 0) {
+    list.replaceChildren(h("li", { class: "empty" }, "まだありません"));
     return;
   }
-  doneList.replaceChildren(
-    ...done.map((w) => {
-      const d = new Date(w.done_at!);
+  list.replaceChildren(
+    ...items.map((w) => {
+      const d = new Date(at(w));
       const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const undo = h("button", { class: "undo" }, "戻す");
-      undo.addEventListener("click", () => patch(w.id, { done_at: null, pos: tailPos(w.kind, w, w.id) }));
+      undo.addEventListener("click", () =>
+        patch(w.id, { done_at: null, archived_at: null, pos: tailPos(w.kind, w, w.id) }),
+      );
+      const buttons: HTMLButtonElement[] = [undo];
+      // しまっていたものを結局やった
+      if (archive) {
+        const done = h("button", { class: "undo" }, "やった");
+        done.addEventListener("click", () => patch(w.id, { done_at: nowRfc3339(), archived_at: null }));
+        buttons.push(done);
+      }
       const del = h("button", { class: "del", "aria-label": `${w.title} を削除` }, "削除");
       del.addEventListener("click", () => {
         if (confirm(`「${w.title}」を削除しますか？`)) store.commit({ op: "delete", id: w.id });
@@ -294,10 +312,10 @@ function renderDone() {
       return h(
         "li",
         {},
-        h("time", { datetime: w.done_at! }, date),
+        h("time", { datetime: at(w) }, date),
         h("span", { class: "title" }, w.title),
         h("span", { class: "tag" }, `${kindLabel(w.kind)} / ${label(w, w.kind)}`),
-        undo,
+        ...buttons,
         del,
       );
     }),
@@ -306,8 +324,8 @@ function renderDone() {
 
 // ───────── タブ ─────────
 
-type View = Kind | "done";
-const VIEWS: View[] = [...KINDS, "done"];
+type View = Kind | "done" | "archive";
+const VIEWS: View[] = [...KINDS, "done", "archive"];
 
 function showView(v: View) {
   for (const t of document.querySelectorAll<HTMLButtonElement>(".tabs button"))
@@ -406,6 +424,9 @@ editor.addEventListener("click", (e) => {
   if (act === "done") {
     markDone(id);
     editor.close();
+  } else if (act === "archive") {
+    patch(id, { archived_at: nowRfc3339() });
+    editor.close();
   } else if (act === "delete" && w && confirm(`「${w.title}」を削除しますか？`)) {
     store.commit({ op: "delete", id });
     editor.close();
@@ -436,7 +457,9 @@ function renderConn() {
 
 function render() {
   if (!dragging) for (const kind of KINDS) renderPlane(kind);
-  renderDone();
+  const wants = [...store.wants.values()];
+  renderPast(doneList, wants.filter((w) => !w.deleted && w.done_at !== null), (w) => w.done_at!, false);
+  renderPast(archiveList, wants.filter(isArchived), (w) => w.archived_at!, true);
   renderConn();
 }
 

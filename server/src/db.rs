@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS wants (
   pos        TEXT    NOT NULL,
   due_at     TEXT,
   done_at    TEXT,
+  archived_at TEXT,
   deleted    INTEGER NOT NULL DEFAULT 0,
   rev        INTEGER NOT NULL,
   created_at TEXT    NOT NULL
@@ -31,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_wants_done ON wants(done_at);
 "#;
 
 const COLUMNS: &str =
-    "id, title, notes, kind, axis_hi, clau, pos, due_at, done_at, deleted, rev, created_at";
+    "id, title, notes, kind, axis_hi, clau, pos, due_at, done_at, deleted, rev, created_at, archived_at";
 
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(dir) = path.parent() {
@@ -67,6 +68,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     if !cols.iter().any(|c| c == "due_at") {
         conn.execute_batch("ALTER TABLE wants ADD COLUMN due_at TEXT;")?;
     }
+    if !cols.iter().any(|c| c == "archived_at") {
+        conn.execute_batch("ALTER TABLE wants ADD COLUMN archived_at TEXT;")?;
+    }
     Ok(())
 }
 
@@ -84,6 +88,7 @@ fn row_to_want(r: &Row) -> rusqlite::Result<Want> {
         deleted: r.get(9)?,
         rev: r.get(10)?,
         created_at: r.get(11)?,
+        archived_at: r.get(12)?,
     })
 }
 
@@ -121,7 +126,7 @@ fn tail_pos(conn: &Connection, kind: Kind, q: Quadrant, exclude: &str) -> Result
     let last: Option<String> = conn.query_row(
         "SELECT max(pos) FROM wants
          WHERE kind = ?1 AND axis_hi = ?2 AND clau = ?3
-           AND deleted = 0 AND done_at IS NULL AND id != ?4",
+           AND deleted = 0 AND done_at IS NULL AND archived_at IS NULL AND id != ?4",
         params![kind.as_str(), q.axis_hi, q.clau, exclude],
         |r| r.get(0),
     )?;
@@ -132,12 +137,12 @@ fn write(conn: &Connection, w: &Want) -> Result<()> {
     conn.execute(
         &format!(
             "INSERT INTO wants ({COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                title = excluded.title, notes = excluded.notes, kind = excluded.kind,
                axis_hi = excluded.axis_hi, clau = excluded.clau, pos = excluded.pos,
                due_at = excluded.due_at, done_at = excluded.done_at,
-               deleted = excluded.deleted, rev = excluded.rev"
+               archived_at = excluded.archived_at, deleted = excluded.deleted, rev = excluded.rev"
         ),
         params![
             w.id,
@@ -151,7 +156,8 @@ fn write(conn: &Connection, w: &Want) -> Result<()> {
             w.done_at,
             w.deleted,
             w.rev,
-            w.created_at
+            w.created_at,
+            w.archived_at
         ],
     )?;
     Ok(())
@@ -167,6 +173,7 @@ pub struct NewWant {
     pub pos: Option<String>,
     pub due_at: Option<String>,
     pub done_at: Option<String>,
+    pub archived_at: Option<String>,
     pub created_at: Option<String>,
 }
 
@@ -196,25 +203,26 @@ pub fn upsert(conn: &mut Connection, n: NewWant) -> Result<Want> {
         // 日時を持てるのは「次にやること」だけ
         due_at: n.due_at.filter(|_| n.kind.has_due()),
         done_at: n.done_at,
+        archived_at: n.archived_at,
     };
     write(&tx, &w)?;
     tx.commit()?;
     Ok(w)
 }
 
-/// 部分更新。行き先が変わった / やったを取り消したのに pos が無ければ、行き先の末尾に付ける。
+/// 部分更新。行き先が変わった / やった・しまったを取り消したのに pos が無ければ、行き先の末尾に付ける。
 pub fn patch(conn: &mut Connection, id: &str, p: &WantPatch) -> Result<Option<Want>> {
     let tx = conn.transaction()?;
     let Some(mut w) = get(&tx, id)? else {
         return Ok(None);
     };
     let before = (w.kind, w.quadrant());
-    let was_done = w.done_at.is_some();
+    let was_active = w.is_active();
     w.apply(p);
     if !w.kind.has_due() {
         w.due_at = None;
     }
-    let moved = (w.kind, w.quadrant()) != before || (was_done && w.done_at.is_none());
+    let moved = (w.kind, w.quadrant()) != before || (!was_active && w.is_active());
     if moved && p.pos.is_none() {
         w.pos = tail_pos(&tx, w.kind, w.quadrant(), &w.id)?;
     }
@@ -257,6 +265,7 @@ mod tests {
             pos: None,
             due_at: None,
             done_at: None,
+            archived_at: None,
             created_at: None,
         }
     }
@@ -334,6 +343,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(w.due_at, None);
+    }
+
+    #[test]
+    fn archived_leaves_the_list() {
+        let mut c = mem();
+        let a = upsert(&mut c, new("a", Kind::Want, true, false)).unwrap();
+        let p = WantPatch { archived_at: Some(Some(now_rfc3339())), ..Default::default() };
+        patch(&mut c, "a", &p).unwrap().unwrap();
+        // しまったものは末尾の計算に数えない
+        let b = upsert(&mut c, new("b", Kind::Want, true, false)).unwrap();
+        assert_eq!(b.pos, a.pos);
+        // 取り出すと末尾に付く
+        let p = WantPatch { archived_at: Some(None), ..Default::default() };
+        let a = patch(&mut c, "a", &p).unwrap().unwrap();
+        assert!(a.is_active());
+        assert!(a.pos > b.pos);
     }
 
     /// 「次にやること」を入れる前の DB がそのまま開けること

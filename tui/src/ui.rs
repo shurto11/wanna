@@ -17,6 +17,8 @@ const TODAY: Color = Color::Yellow;
 
 /// やったことリストの名前 (Kind::label と並ぶ3つめ)
 const DONE: &str = "Done";
+/// 保管庫の名前 (4つめ)
+const ARCHIVE: &str = "Archive";
 
 /// サイドバーを出す最小の画面幅
 const SIDEBAR_MIN_WIDTH: u16 = 100;
@@ -38,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(f, app, tabs);
     match app.screen {
         Screen::List => draw_grid(f, app, main),
-        Screen::Done => draw_done(f, app, main),
+        Screen::Done | Screen::Archive => draw_past(f, app, main),
     }
     if let Some(side) = side {
         draw_sidebar(f, app, side);
@@ -47,17 +49,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_popup(f, app);
 }
 
-/// Want / Must / Done の切り替え位置を出す。
+/// Want / Must / Done / Archive の切り替え位置を出す。
 /// 囲みの `[` `]` がそのまま切り替えのキー
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let on = Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD);
     let off = Style::new().fg(DIM);
-    let selected = |s: Screen, k: Kind| app.screen == s && (s == Screen::Done || app.kind == k);
+    let selected = |k: Kind| app.screen == Screen::List && app.kind == k;
     let mut spans = vec![Span::styled("[", Style::new().fg(DIM))];
     for (name, sel) in [
-        (Kind::Want.label(), selected(Screen::List, Kind::Want)),
-        (Kind::Task.label(), selected(Screen::List, Kind::Task)),
+        (Kind::Want.label(), selected(Kind::Want)),
+        (Kind::Task.label(), selected(Kind::Task)),
         (DONE, app.screen == Screen::Done),
+        (ARCHIVE, app.screen == Screen::Archive),
     ] {
         spans.push(Span::styled(format!(" {name} "), if sel { on } else { off }));
         spans.push(Span::raw(" "));
@@ -180,14 +183,15 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
     }
 }
 
-fn draw_done(f: &mut Frame, app: &mut App, area: Rect) {
-    let done = app.done();
-    let title_width = done.iter().map(|w| w.title.width()).max().unwrap_or(0).min(40);
-    let items: Vec<ListItem> = done
+/// やったこと / 保管庫。日付はやった日 / しまった日
+fn draw_past(f: &mut Frame, app: &mut App, area: Rect) {
+    let archive = app.screen == Screen::Archive;
+    let (list, name) = if archive { (app.archived(), ARCHIVE) } else { (app.done(), DONE) };
+    let title_width = list.iter().map(|w| w.title.width()).max().unwrap_or(0).min(40);
+    let items: Vec<ListItem> = list
         .iter()
         .map(|w| {
-            let date = w
-                .done_at
+            let date = if archive { &w.archived_at } else { &w.done_at }
                 .as_deref()
                 .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
                 .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
@@ -203,12 +207,12 @@ fn draw_done(f: &mut Frame, app: &mut App, area: Rect) {
             ]))
         })
         .collect();
-    let empty = done.is_empty();
+    let empty = list.is_empty();
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
-        .title(Span::styled(format!(" ▼ {DONE} "), Style::new().fg(ACCENT).bold()));
+        .title(Span::styled(format!(" ▼ {name} "), Style::new().fg(ACCENT).bold()));
     let widget = List::new(items)
         .block(block)
         .highlight_style(Style::new().bg(ACCENT).fg(Color::Black));
@@ -219,9 +223,11 @@ fn draw_done(f: &mut Frame, app: &mut App, area: Rect) {
             area.inner(ratatui::layout::Margin::new(1, 1)),
         );
     } else {
-        f.render_stateful_widget(widget, area, &mut app.done_list);
+        let state = if archive { &mut app.archive_list } else { &mut app.done_list };
+        f.render_stateful_widget(widget, area, state);
     }
 }
+
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
@@ -284,12 +290,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => {
             let help = match (app.screen, app.kind) {
                 (Screen::List, Kind::Task) => {
-                    "[/]:切替 n:追加 e:編集 s:日時 m:メモ t:やった d:削除 J/K:並べ替え X:Wantへ q:終了"
+                    "[/]:切替 n:追加 e:編集 s:日時 m:メモ t:やった a:しまう d:削除 J/K:並べ替え X:Wantへ q:終了"
                 }
                 (Screen::List, Kind::Want) => {
-                    "[/]:切替 n:追加 e:編集 m:メモ t:やった d:削除 hjkl:移動 J/K:並べ替え X:Mustへ q:終了"
+                    "[/]:切替 n:追加 e:編集 m:メモ t:やった a:しまう d:削除 hjkl:移動 J/K:並べ替え X:Mustへ q:終了"
                 }
                 (Screen::Done, _) => "[/]:切替 j/k:移動 m:メモ u:やったを取り消す d:削除 q:終了",
+                (Screen::Archive, _) => "[/]:切替 j/k:移動 m:メモ u:リストに戻す t:やった d:削除 q:終了",
             };
             spans.push(Span::styled(help, Style::new().fg(DIM)));
         }

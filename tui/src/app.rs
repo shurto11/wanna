@@ -12,6 +12,8 @@ pub enum Screen {
     /// やりたいこと / 次にやること (どちらかは `App::kind`)
     List,
     Done,
+    /// やってはいないが、リストに置くほどでもなくなったもの
+    Archive,
 }
 
 /// 1行のテキスト入力
@@ -168,6 +170,7 @@ pub struct App {
     /// リストごと・区分ごとの選択行
     pub lists: [[ListState; 4]; 2],
     pub done_list: ListState,
+    pub archive_list: ListState,
     pub message: Option<String>,
     pub quit: bool,
     pub editor: Option<EditorReq>,
@@ -194,6 +197,7 @@ impl App {
             cur: 0,
             lists: Default::default(),
             done_list: ListState::default(),
+            archive_list: ListState::default(),
             message: None,
             quit: false,
             editor: None,
@@ -210,6 +214,7 @@ impl App {
             }
         }
         app.done_list.select(Some(0));
+        app.archive_list.select(Some(0));
         app.request_sync();
         Ok(app)
     }
@@ -239,6 +244,29 @@ impl App {
         v
     }
 
+    /// 保管庫。しまった日の降順 (どちらのリストのものも混ぜて並べる)
+    pub fn archived(&self) -> Vec<&Want> {
+        let mut v: Vec<&Want> = self.wants.iter().filter(|w| w.is_archived()).collect();
+        v.sort_by(|a, b| b.archived_at.cmp(&a.archived_at).then_with(|| a.id.cmp(&b.id)));
+        v
+    }
+
+    /// やったこと / 保管庫 の中身と選択行。リストの画面では None
+    fn past(&self) -> Option<(Vec<&Want>, usize)> {
+        match self.screen {
+            Screen::List => None,
+            Screen::Done => Some((self.done(), self.done_list.selected().unwrap_or(0))),
+            Screen::Archive => Some((self.archived(), self.archive_list.selected().unwrap_or(0))),
+        }
+    }
+
+    fn past_list_mut(&mut self) -> &mut ListState {
+        match self.screen {
+            Screen::Archive => &mut self.archive_list,
+            _ => &mut self.done_list,
+        }
+    }
+
     pub fn cur_q(&self) -> Quadrant {
         Quadrant::ALL[self.cur]
     }
@@ -257,9 +285,9 @@ impl App {
     }
 
     pub fn selected(&self) -> Option<&Want> {
-        match self.screen {
-            Screen::List => self.cur_list().get(self.sel()).copied(),
-            Screen::Done => self.done().get(self.done_list.selected().unwrap_or(0)).copied(),
+        match self.past() {
+            None => self.cur_list().get(self.sel()).copied(),
+            Some((list, sel)) => list.get(sel).copied(),
         }
     }
 
@@ -275,6 +303,9 @@ impl App {
         let len = self.done().len();
         let s = self.done_list.selected().unwrap_or(0);
         self.done_list.select(Some(s.min(len.saturating_sub(1))));
+        let len = self.archived().len();
+        let s = self.archive_list.selected().unwrap_or(0);
+        self.archive_list.select(Some(s.min(len.saturating_sub(1))));
     }
 
     /// `id` のあるリスト・区分・行へカーソルを合わせる
@@ -482,7 +513,7 @@ impl App {
                 self.message = None;
                 match self.screen {
                     Screen::List => self.key_list(key),
-                    Screen::Done => self.key_done(key),
+                    Screen::Done | Screen::Archive => self.key_past(key),
                 }
                 return;
             }
@@ -683,13 +714,14 @@ impl App {
         self.mode = Mode::Edit(e);
     }
 
-    /// 表示を Want → Must → Done の順に回す
+    /// 表示を Want → Must → Done → Archive の順に回す
     fn cycle_view(&mut self, forward: bool) {
         let cur = match self.screen {
             Screen::List => self.kind.index(),
             Screen::Done => 2,
+            Screen::Archive => 3,
         };
-        match (cur + if forward { 1 } else { 2 }) % 3 {
+        match (cur + if forward { 1 } else { 3 }) % 4 {
             0 => {
                 self.screen = Screen::List;
                 self.kind = Kind::Want;
@@ -698,7 +730,8 @@ impl App {
                 self.screen = Screen::List;
                 self.kind = Kind::Task;
             }
-            _ => self.screen = Screen::Done,
+            2 => self.screen = Screen::Done,
+            _ => self.screen = Screen::Archive,
         }
     }
 
@@ -769,6 +802,13 @@ impl App {
                     self.message = Some(format!("やった！ {title}"));
                 }
             }
+            KeyCode::Char('a') => {
+                if let Some(w) = self.selected() {
+                    let (id, title) = (w.id.clone(), w.title.clone());
+                    self.patch(&id, WantPatch { archived_at: Some(Some(now_rfc3339())), ..Default::default() });
+                    self.message = Some(format!("保管庫にしまいました: {title}"));
+                }
+            }
             KeyCode::Char('d') => {
                 if let Some(w) = self.selected() {
                     self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
@@ -778,9 +818,11 @@ impl App {
         }
     }
 
-    fn key_done(&mut self, key: KeyEvent) {
-        let len = self.done().len();
-        let sel = self.done_list.selected().unwrap_or(0);
+    /// やったこと / 保管庫 の画面
+    fn key_past(&mut self, key: KeyEvent) {
+        let Some((list, sel)) = self.past() else { return };
+        let len = list.len();
+        let done = self.screen == Screen::Done;
         match key.code {
             KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
             KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
@@ -788,24 +830,39 @@ impl App {
             KeyCode::Esc => self.screen = Screen::List,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down if sel + 1 < len => {
-                self.done_list.select(Some(sel + 1))
+                self.past_list_mut().select(Some(sel + 1))
             }
-            KeyCode::Char('k') | KeyCode::Up if sel > 0 => self.done_list.select(Some(sel - 1)),
-            KeyCode::Char('g') | KeyCode::Home => self.done_list.select(Some(0)),
+            KeyCode::Char('k') | KeyCode::Up if sel > 0 => self.past_list_mut().select(Some(sel - 1)),
+            KeyCode::Char('g') | KeyCode::Home => self.past_list_mut().select(Some(0)),
             KeyCode::Char('G') | KeyCode::End => {
-                self.done_list.select(Some(len.saturating_sub(1)))
+                self.past_list_mut().select(Some(len.saturating_sub(1)))
             }
+            // リストに戻す
             KeyCode::Char('u') => {
                 if let Some(w) = self.selected() {
                     let (id, title, kind, q) =
                         (w.id.clone(), w.title.clone(), w.kind, w.quadrant());
                     let patch = WantPatch {
                         done_at: Some(None),
+                        archived_at: Some(None),
                         pos: Some(self.tail_pos(kind, q)),
                         ..Default::default()
                     };
                     self.patch(&id, patch);
                     self.message = Some(format!("{}に戻しました: {title}", kind.label()));
+                }
+            }
+            // しまっていたものを結局やった
+            KeyCode::Char('t') if !done => {
+                if let Some(w) = self.selected() {
+                    let (id, title) = (w.id.clone(), w.title.clone());
+                    let patch = WantPatch {
+                        done_at: Some(Some(now_rfc3339())),
+                        archived_at: Some(None),
+                        ..Default::default()
+                    };
+                    self.patch(&id, patch);
+                    self.message = Some(format!("やった！ {title}"));
                 }
             }
             KeyCode::Char('m') => self.edit_notes(),
@@ -817,6 +874,7 @@ impl App {
             _ => {}
         }
     }
+
 }
 
 /// エディタで開く中身。空ならテンプレートを入れておく

@@ -91,6 +91,9 @@ pub struct Want {
     /// やった日時 (RFC3339)。入っていれば「やったこと」側
     #[serde(default)]
     pub done_at: Option<String>,
+    /// しまった日時 (RFC3339)。やってはいないがリストに置くほどでもなくなったもの
+    #[serde(default)]
+    pub archived_at: Option<String>,
     #[serde(default)]
     pub deleted: bool,
     /// サーバー採番のリビジョン。クライアント未送信のものは 0
@@ -112,6 +115,7 @@ impl Want {
             pos,
             due_at: None,
             done_at: None,
+            archived_at: None,
             deleted: false,
             rev: 0,
             created_at: now_rfc3339(),
@@ -127,9 +131,14 @@ impl Want {
         self.quadrant().label(self.kind)
     }
 
-    /// リストに出るもの（やってない・消してない）
+    /// リストに出るもの（やってない・しまってない・消してない）
     pub fn is_active(&self) -> bool {
-        !self.deleted && self.done_at.is_none()
+        !self.deleted && self.done_at.is_none() && self.archived_at.is_none()
+    }
+
+    /// 保管庫に出るもの。やったことになっていれば、やったこと側に出す
+    pub fn is_archived(&self) -> bool {
+        !self.deleted && self.done_at.is_none() && self.archived_at.is_some()
     }
 
     /// 日時。やりたいことは持たないので常に None
@@ -162,6 +171,9 @@ impl Want {
         }
         if let Some(v) = &p.done_at {
             self.done_at = v.clone();
+        }
+        if let Some(v) = &p.archived_at {
+            self.archived_at = v.clone();
         }
     }
 }
@@ -222,6 +234,13 @@ pub struct WantPatch {
         deserialize_with = "double_option"
     )]
     pub done_at: Option<Option<String>>,
+    /// `None` = 変更なし、`Some(None)` = 取り出す (JSON の null)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "double_option"
+    )]
+    pub archived_at: Option<Option<String>>,
     /// 書き込み時点の rev がこれでなければサーバーは 409 を返す (読んで書き戻す人向け)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_rev: Option<i64>,
@@ -277,6 +296,21 @@ mod tests {
         assert_eq!(w.quadrant_label(), "エネルギー高・clau高");
         w.apply(&WantPatch { kind: Some(Kind::Task), ..Default::default() });
         assert_eq!(w.quadrant_label(), "重要度高・clau高");
+    }
+
+    #[test]
+    fn archive() {
+        let mut w = Want::new("a", Kind::Want, true, false, "V".into());
+        w.apply(&WantPatch { archived_at: Some(Some("t".into())), ..Default::default() });
+        assert!(!w.is_active());
+        assert!(w.is_archived());
+        // やったことにすれば保管庫からは消える
+        w.apply(&WantPatch { done_at: Some(Some("t".into())), ..Default::default() });
+        assert!(!w.is_archived());
+        w.apply(&WantPatch { done_at: Some(None), archived_at: Some(None), ..Default::default() });
+        assert!(w.is_active());
+        let p: WantPatch = serde_json::from_str(r#"{"archived_at": null}"#).unwrap();
+        assert_eq!(p.archived_at, Some(None));
     }
 
     #[test]

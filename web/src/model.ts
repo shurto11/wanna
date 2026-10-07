@@ -10,6 +10,9 @@ export const kindLabel = (k: Kind) => (k === "task" ? "Must" : "Want");
 /** やったことリストの名前 (kindLabel と並ぶ3つめ) */
 export const DONE_LABEL = "Done";
 
+/** 保管庫の名前 (4つめ) */
+export const ARCHIVE_LABEL = "Archive";
+
 /** 縦軸の名前 */
 export const axisLabel = (k: Kind) => (k === "task" ? "重要度" : "エネルギー");
 
@@ -32,13 +35,15 @@ export interface Want {
   /** 日時 (due.ts の保存形式)。次にやることだけが持つ */
   due_at: string | null;
   done_at: string | null;
+  /** しまった日時。やってはいないがリストに置くほどでもなくなったもの (古いキャッシュには無い) */
+  archived_at?: string | null;
   deleted: boolean;
   rev: number;
   created_at: string;
 }
 
 export type WantPatch = Partial<
-  Pick<Want, "title" | "notes" | "kind" | "axis_hi" | "clau" | "pos" | "due_at" | "done_at">
+  Pick<Want, "title" | "notes" | "kind" | "axis_hi" | "clau" | "pos" | "due_at" | "done_at" | "archived_at">
 >;
 
 export interface Quadrant {
@@ -62,7 +67,10 @@ export function label(q: Quadrant, kind: Kind): string {
 
 export const sameQuadrant = (w: Quadrant, q: Quadrant) => w.axis_hi === q.axis_hi && w.clau === q.clau;
 
-export const isActive = (w: Want) => !w.deleted && w.done_at === null;
+export const isActive = (w: Want) => !w.deleted && w.done_at === null && w.archived_at == null;
+
+/** 保管庫に出るもの。やったことになっていれば、やったこと側に出す */
+export const isArchived = (w: Want) => !w.deleted && w.done_at === null && w.archived_at != null;
 
 /** 日時。やりたいことは持たないので常に null */
 export const dueOf = (w: Want) => (hasDue(w.kind) ? w.due_at : null);

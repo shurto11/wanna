@@ -180,6 +180,8 @@ struct CreateBody {
     #[serde(default)]
     done_at: Option<String>,
     #[serde(default)]
+    archived_at: Option<String>,
+    #[serde(default)]
     created_at: Option<String>,
 }
 
@@ -206,6 +208,7 @@ async fn create(State(st): State<Shared>, Json(b): Json<CreateBody>) -> ApiResul
             pos,
             due_at: b.due_at,
             done_at: b.done_at,
+            archived_at: b.archived_at,
             created_at: b.created_at,
         },
     )?;

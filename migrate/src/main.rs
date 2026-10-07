@@ -260,6 +260,7 @@ fn main() -> Result<()> {
             pos: String::new(),
             due_at: None,
             done_at,
+            archived_at: None,
             deleted: false,
             rev: 0,
             created_at: t.updated.clone().unwrap_or_else(wanna_core::now_rfc3339),

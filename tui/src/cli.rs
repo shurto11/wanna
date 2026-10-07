@@ -15,13 +15,15 @@ use wanna_core::{notes, Kind, Quadrant, Want, WantPatch};
 const USAGE: &str = "\
 使い方: wanna <コマンド> ...   (引数なしで TUI)
 
-  ls [--want|--must] [--done] [--json]   一覧 (既定は両方のやってないもの)
+  ls [--want|--must] [--done|--archived] [--json]
+                                         一覧 (既定は両方のやってない・しまってないもの)
   show [ID] [--json]                     1件とメモを出す (ID 省略で @)
   new <タイトル> [--want] [--lo] [--no-clau] [--link]
                                          テンプレート入りで作る (既定は Must・重要度高・clau高)
   log [-c] <ID> <テキスト...>            進捗ログに日付付きで1行足す (-c で [c] を付ける)
   note <ID> <見出し> [テキスト...|-]     見出しの本文を置き換える (- で標準入力。省略で表示)
   done <ID>                              やったことにする
+  archive <ID>                           保管庫にしまう (やってないがリストに置くほどでもないもの)
   link [ID]                              このディレクトリに1件を紐付ける (省略で今の紐付けを表示)
   unlink                                 紐付けを外す
 
@@ -47,7 +49,15 @@ pub fn run(args: &[String]) -> Result<()> {
         bail!("知らないオプション: {f}\n\n{USAGE}");
     }
     match cmd.as_str() {
-        "ls" => ls(&client()?, has("--want"), has("--must"), has("--done"), has("--json")),
+        "ls" => {
+            let shelf = match (has("--done"), has("--archived")) {
+                (true, true) => bail!("--done と --archived は一緒に使えません"),
+                (true, false) => Shelf::Done,
+                (false, true) => Shelf::Archived,
+                _ => Shelf::Active,
+            };
+            ls(&client()?, has("--want"), has("--must"), shelf, has("--json"))
+        }
         "show" => show(&client()?, pos.first().copied().unwrap_or("@"), has("--json")),
         "new" => {
             let title = pos.join(" ");
@@ -98,6 +108,15 @@ pub fn run(args: &[String]) -> Result<()> {
             println!("やりました: {}", w.title);
             Ok(())
         }
+        "archive" => {
+            let [id] = pos.as_slice() else { bail!(USAGE) };
+            let c = client()?;
+            let w = find(&c, id)?;
+            let p = WantPatch { archived_at: Some(Some(wanna_core::now_rfc3339())), ..Default::default() };
+            c.patch(&w.id, &p)?;
+            println!("保管庫にしまいました: {}", w.title);
+            Ok(())
+        }
         "link" => match pos.first() {
             Some(id) => link(&find(&client()?, id)?),
             None => {
@@ -121,7 +140,14 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 const KNOWN_FLAGS: &[&str] =
-    &["--want", "--must", "--done", "--json", "--lo", "--no-clau", "--link", "-c"];
+    &["--want", "--must", "--done", "--archived", "--json", "--lo", "--no-clau", "--link", "-c"];
+
+/// ls でどこを出すか
+enum Shelf {
+    Active,
+    Done,
+    Archived,
+}
 
 fn client() -> Result<Client> {
     let cfg = Config::load();
@@ -178,10 +204,14 @@ fn rewrite(c: &Client, id: &str, f: impl Fn(&str) -> String) -> Result<Want> {
     bail!("何度やっても他の書き込みとぶつかりました。少し待ってやり直してください")
 }
 
-fn ls(c: &Client, want: bool, must: bool, done: bool, json: bool) -> Result<()> {
+fn ls(c: &Client, want: bool, must: bool, shelf: Shelf, json: bool) -> Result<()> {
     let mut ws: Vec<Want> = all(c)?
         .into_iter()
-        .filter(|w| w.done_at.is_some() == done)
+        .filter(|w| match shelf {
+            Shelf::Active => w.is_active(),
+            Shelf::Done => w.done_at.is_some(),
+            Shelf::Archived => w.is_archived(),
+        })
         .filter(|w| match (want, must) {
             (true, false) => w.kind == Kind::Want,
             (false, true) => w.kind == Kind::Task,
@@ -223,6 +253,8 @@ fn show(c: &Client, id: &str, json: bool) -> Result<()> {
     }
     if let Some(d) = &w.done_at {
         println!("やった: {d}");
+    } else if let Some(d) = &w.archived_at {
+        println!("しまった: {d}");
     }
     println!();
     println!("{}", if w.notes.is_empty() { notes::template() } else { w.notes.clone() });
