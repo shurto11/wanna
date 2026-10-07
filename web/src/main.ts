@@ -5,6 +5,7 @@ import {
   ARCHIVE_LABEL,
   DONE_LABEL,
   KINDS,
+  MEMO_LABEL,
   QUADRANTS,
   axisLabel,
   byPos,
@@ -23,6 +24,7 @@ import {
   type WantPatch,
 } from "./model.ts";
 import { Store, type Conn } from "./store.ts";
+import type { MemoEditor } from "./memo-editor.ts";
 import "./style.css";
 
 const $ = <T extends HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
@@ -54,6 +56,7 @@ document.querySelector("#app")!.innerHTML = `
       <button role="tab" data-view="task" aria-selected="false">${kindLabel("task")}</button>
       <button role="tab" data-view="done" aria-selected="false">${DONE_LABEL}</button>
       <button role="tab" data-view="archive" aria-selected="false">${ARCHIVE_LABEL}</button>
+      <button role="tab" data-view="memo" aria-selected="false">${MEMO_LABEL}</button>
     </nav>
     <button class="conn" id="conn" title="同期の設定"></button>
   </header>
@@ -64,6 +67,27 @@ document.querySelector("#app")!.innerHTML = `
 
   <section id="view-archive" class="view" hidden>
     <ol class="done-list" id="archive-list"></ol>
+  </section>
+
+  <section id="view-memo" class="view" hidden>
+    <div id="memo-index">
+      <form class="memo-add" id="memo-add">
+        <input name="title" placeholder="＋ 新しいメモ" aria-label="新しいメモの名前" autocomplete="off" enterkeyhint="done" />
+      </form>
+      <ol class="done-list" id="memo-list"></ol>
+    </div>
+    <div id="memo-edit" class="memo-edit" hidden>
+      <div class="memo-head">
+        <button type="button" id="memo-back" class="ghost-btn">← 一覧</button>
+        <input id="memo-title" class="memo-title" aria-label="名前" autocomplete="off" />
+        <span id="memo-state" class="memo-state"></span>
+        <label class="memo-vim"><input type="checkbox" id="memo-vim" /> vim</label>
+        <button type="button" id="memo-save" class="primary">保存</button>
+        <button type="button" id="memo-del" class="danger">削除</button>
+      </div>
+      <div id="memo-body" class="memo-body"></div>
+      <p class="hint" id="memo-hint">:w 保存 · :q 一覧へ戻る · :wq 保存して戻る</p>
+    </div>
   </section>
 
   <dialog id="editor">
@@ -292,8 +316,7 @@ function renderPast(list: HTMLOListElement, items: Want[], at: (w: Want) => stri
   }
   list.replaceChildren(
     ...items.map((w) => {
-      const d = new Date(at(w));
-      const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const date = ymd(at(w));
       const undo = h("button", { class: "undo" }, "戻す");
       undo.addEventListener("click", () =>
         patch(w.id, { done_at: null, archived_at: null, pos: tailPos(w.kind, w, w.id) }),
@@ -322,12 +345,171 @@ function renderPast(list: HTMLOListElement, items: Want[], at: (w: Want) => stri
   );
 }
 
+// ───────── メモ ─────────
+
+const memoList = $<HTMLOListElement>("#memo-list");
+const memoIndex = $<HTMLDivElement>("#memo-index");
+const memoEdit = $<HTMLDivElement>("#memo-edit");
+const memoTitle = $<HTMLInputElement>("#memo-title");
+const memoState = $<HTMLSpanElement>("#memo-state");
+const memoVim = $<HTMLInputElement>("#memo-vim");
+const memoHint = $<HTMLParagraphElement>("#memo-hint");
+let memo: { id: string; editor: MemoEditor } | null = null;
+/** エディタは重いので、メモを開くときに読み込む */
+type EditorModule = typeof import("./memo-editor.ts");
+let editorModule: Promise<EditorModule> | null = null;
+const loadEditor = () => (editorModule ??= import("./memo-editor.ts"));
+
+const ymd = (iso: string) => {
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+/** メモの一覧。作った日の降順で、日付と名前だけ出す */
+function renderMemos() {
+  const items = [...store.wants.values()]
+    .filter((w) => !w.deleted && w.kind === "memo")
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
+  if (items.length === 0) {
+    memoList.replaceChildren(h("li", { class: "empty" }, "まだありません"));
+    return;
+  }
+  memoList.replaceChildren(
+    ...items.map((w) => {
+      const li = h(
+        "li",
+        { class: "memo-row", tabindex: "0" },
+        h("time", { datetime: w.created_at }, ymd(w.created_at)),
+        h("span", { class: "title" }, w.title),
+      );
+      li.addEventListener("click", () => openMemo(w.id));
+      li.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") openMemo(w.id);
+      });
+      return li;
+    }),
+  );
+}
+
+function setMemoDirty(dirty: boolean) {
+  memoState.textContent = dirty ? "未保存" : "";
+}
+
+async function openMemo(id: string) {
+  let m: EditorModule;
+  try {
+    m = await loadEditor();
+  } catch {
+    editorModule = null;
+    alert("エディタを読み込めませんでした。オンラインでもう一度開いてください");
+    return;
+  }
+  const w = store.wants.get(id);
+  if (!w) return;
+  closeMemo();
+  memoTitle.value = w.title;
+  memoVim.checked = m.vimPreferred();
+  memoHint.hidden = !memoVim.checked;
+  memoIndex.hidden = true;
+  memoEdit.hidden = false;
+  const editor = m.createMemoEditor($("#memo-body"), w.notes, {
+    vim: memoVim.checked,
+    onSave: saveMemo,
+    onClose: closeMemo,
+    onChange: () => setMemoDirty(true),
+  });
+  memo = { id, editor };
+  setMemoDirty(false);
+  editor.view.focus();
+}
+
+/** 開いているメモを書き戻す。変わっていなければ何もしない */
+function saveMemo() {
+  if (!memo) return;
+  const w = store.wants.get(memo.id);
+  if (!w) return;
+  const p: WantPatch = {};
+  const title = memoTitle.value.trim();
+  if (title && title !== w.title) p.title = title;
+  const notes = memo.editor.view.state.doc.toString().trimEnd();
+  if (notes !== w.notes) p.notes = notes;
+  if (Object.keys(p).length > 0) patch(w.id, p);
+  setMemoDirty(false);
+}
+
+/** 保存して一覧へ戻る */
+function closeMemo() {
+  if (!memo) return;
+  saveMemo();
+  memo.editor.destroy();
+  memo = null;
+  memoEdit.hidden = true;
+  memoIndex.hidden = false;
+}
+
+$<HTMLFormElement>("#memo-add").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = $<HTMLInputElement>("input", e.target as HTMLFormElement);
+  const title = input.value.trim();
+  if (!title) return;
+  input.value = "";
+  const id = uuidv7();
+  store.commit({
+    op: "create",
+    want: {
+      id,
+      title,
+      notes: "",
+      kind: "memo",
+      axis_hi: false,
+      clau: false,
+      pos: between(null, null),
+      due_at: null,
+      done_at: null,
+      archived_at: null,
+      deleted: false,
+      rev: 0,
+      created_at: nowRfc3339(),
+    },
+  });
+  openMemo(id);
+});
+
+$("#memo-back").addEventListener("click", closeMemo);
+$("#memo-save").addEventListener("click", saveMemo);
+memoTitle.addEventListener("input", () => setMemoDirty(true));
+memoTitle.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") memo?.editor.view.focus();
+});
+memoVim.addEventListener("change", async () => {
+  (await loadEditor()).setVimPreferred(memoVim.checked);
+  memoHint.hidden = !memoVim.checked;
+  memo?.editor.setVim(memoVim.checked);
+  memo?.editor.view.focus();
+});
+$("#memo-del").addEventListener("click", () => {
+  if (!memo) return;
+  const w = store.wants.get(memo.id);
+  if (!w || !confirm(`「${w.title}」を削除しますか？`)) return;
+  const id = memo.id;
+  memo.editor.destroy();
+  memo = null;
+  memoEdit.hidden = true;
+  memoIndex.hidden = false;
+  store.commit({ op: "delete", id });
+});
+// タブを閉じる・裏に回るときに書きかけを残す
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveMemo();
+});
+
 // ───────── タブ ─────────
 
 type View = Kind | "done" | "archive";
-const VIEWS: View[] = [...KINDS, "done", "archive"];
+const VIEWS: View[] = [...KINDS, "done", "archive", "memo"];
 
 function showView(v: View) {
+  if (v !== "memo") saveMemo();
   for (const t of document.querySelectorAll<HTMLButtonElement>(".tabs button"))
     t.setAttribute("aria-selected", String(t.dataset.view === v));
   for (const x of VIEWS) $(`#view-${x}`).hidden = x !== v;
@@ -460,6 +642,14 @@ function render() {
   const wants = [...store.wants.values()];
   renderPast(doneList, wants.filter((w) => !w.deleted && w.done_at !== null), (w) => w.done_at!, false);
   renderPast(archiveList, wants.filter(isArchived), (w) => w.archived_at!, true);
+  renderMemos();
+  // 開いているメモが他で消されたら一覧へ戻す
+  if (memo && store.wants.get(memo.id)?.deleted !== false) {
+    memo.editor.destroy();
+    memo = null;
+    memoEdit.hidden = true;
+    memoIndex.hidden = false;
+  }
   renderConn();
 }
 

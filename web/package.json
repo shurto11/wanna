@@ -9,6 +9,10 @@
     "test": "node --experimental-strip-types --test src/*.test.ts"
   },
   "dependencies": {
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/state": "^6.7.6",
+    "@replit/codemirror-vim": "^6.4.0",
+    "codemirror": "^6.0.2",
     "idb": "^8.0.3",
     "sortablejs": "^1.15.7"
   },

@@ -15,8 +15,8 @@ use wanna_core::{notes, Kind, Quadrant, Want, WantPatch};
 const USAGE: &str = "\
 使い方: wanna <コマンド> ...   (引数なしで TUI)
 
-  ls [--want|--must] [--done|--archived] [--json]
-                                         一覧 (既定は両方のやってない・しまってないもの)
+  ls [--want|--must|--memo] [--done|--archived] [--json]
+                                         一覧 (既定は両方のやってない・しまってないもの。メモは --memo)
   show [ID] [--json]                     1件とメモを出す (ID 省略で @)
   new <タイトル> [--want] [--lo] [--no-clau] [--link]
                                          テンプレート入りで作る (既定は Must・重要度高・clau高)
@@ -56,6 +56,9 @@ pub fn run(args: &[String]) -> Result<()> {
                 (false, true) => Shelf::Archived,
                 _ => Shelf::Active,
             };
+            if has("--memo") {
+                return ls_memos(&client()?, has("--json"));
+            }
             ls(&client()?, has("--want"), has("--must"), shelf, has("--json"))
         }
         "show" => show(&client()?, pos.first().copied().unwrap_or("@"), has("--json")),
@@ -140,7 +143,7 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 
 const KNOWN_FLAGS: &[&str] =
-    &["--want", "--must", "--done", "--archived", "--json", "--lo", "--no-clau", "--link", "-c"];
+    &["--want", "--must", "--memo", "--done", "--archived", "--json", "--lo", "--no-clau", "--link", "-c"];
 
 /// ls でどこを出すか
 enum Shelf {
@@ -212,6 +215,7 @@ fn ls(c: &Client, want: bool, must: bool, shelf: Shelf, json: bool) -> Result<()
             Shelf::Done => w.done_at.is_some(),
             Shelf::Archived => w.is_archived(),
         })
+        .filter(|w| w.kind.is_list())
         .filter(|w| match (want, must) {
             (true, false) => w.kind == Kind::Want,
             (false, true) => w.kind == Kind::Task,
@@ -239,6 +243,24 @@ fn ls(c: &Client, want: bool, must: bool, shelf: Shelf, json: bool) -> Result<()
     Ok(())
 }
 
+/// メモの一覧。作った日の降順
+fn ls_memos(c: &Client, json: bool) -> Result<()> {
+    let mut ws: Vec<Want> = all(c)?.into_iter().filter(|w| w.kind == Kind::Memo).collect();
+    ws.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ws)?);
+        return Ok(());
+    }
+    let mut out = std::io::stdout().lock();
+    for w in &ws {
+        let date = w.created_at.get(..10).unwrap_or(&w.created_at);
+        if writeln!(out, "{}  {date}  {}", short(&w.id), w.title).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn show(c: &Client, id: &str, json: bool) -> Result<()> {
     let w = find(c, id)?;
     if json {
@@ -247,7 +269,11 @@ fn show(c: &Client, id: &str, json: bool) -> Result<()> {
     }
     println!("# {}", w.title);
     println!("id: {}", w.id);
-    println!("{} / {}", w.kind.label(), w.quadrant_label());
+    if w.kind.is_list() {
+        println!("{} / {}", w.kind.label(), w.quadrant_label());
+    } else {
+        println!("{} / {}", w.kind.label(), w.created_at);
+    }
     if let Some(d) = w.due() {
         println!("日時: {d}");
     }

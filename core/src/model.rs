@@ -4,16 +4,18 @@ use serde::{Deserialize, Deserializer, Serialize};
 ///
 /// - `Want` … やりたいこと。縦軸はエネルギー。日時は持たない
 /// - `Task` … 次にやること。縦軸は重要度。日時を持てる
+/// - `Memo` … メモ。区分・日時・やった/しまったを持たず、名前とメモ本文だけ使う
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     #[default]
     Want,
     Task,
+    Memo,
 }
 
 impl Kind {
-    /// 画面上の並び
+    /// 区分で並べるリスト (画面上の並び)。メモは含まない
     pub const ALL: [Kind; 2] = [Kind::Want, Kind::Task];
 
     /// リストの名前
@@ -21,6 +23,7 @@ impl Kind {
         match self {
             Kind::Want => "Want",
             Kind::Task => "Must",
+            Kind::Memo => "Memo",
         }
     }
 
@@ -29,6 +32,7 @@ impl Kind {
         match self {
             Kind::Want => "エネルギー",
             Kind::Task => "重要度",
+            Kind::Memo => "",
         }
     }
 
@@ -37,10 +41,17 @@ impl Kind {
         self == Kind::Task
     }
 
+    /// 区分で並べるリストか
+    pub fn is_list(self) -> bool {
+        self != Kind::Memo
+    }
+
+    /// もう一方のリスト。メモはメモのまま
     pub fn other(self) -> Kind {
         match self {
             Kind::Want => Kind::Task,
             Kind::Task => Kind::Want,
+            Kind::Memo => Kind::Memo,
         }
     }
 
@@ -48,6 +59,7 @@ impl Kind {
         match self {
             Kind::Want => 0,
             Kind::Task => 1,
+            Kind::Memo => 2,
         }
     }
 
@@ -56,6 +68,7 @@ impl Kind {
         match self {
             Kind::Want => "want",
             Kind::Task => "task",
+            Kind::Memo => "memo",
         }
     }
 
@@ -63,6 +76,7 @@ impl Kind {
     pub fn from_str(s: &str) -> Kind {
         match s {
             "task" => Kind::Task,
+            "memo" => Kind::Memo,
             _ => Kind::Want,
         }
     }
@@ -126,8 +140,11 @@ impl Want {
         Quadrant { axis_hi: self.axis_hi, clau: self.clau }
     }
 
-    /// 区分の表示 (例: "エネルギー高・clau低")
+    /// 区分の表示 (例: "エネルギー高・clau低")。メモは区分を持たないので空
     pub fn quadrant_label(&self) -> String {
+        if !self.kind.is_list() {
+            return String::new();
+        }
         self.quadrant().label(self.kind)
     }
 
@@ -311,6 +328,19 @@ mod tests {
         assert!(w.is_active());
         let p: WantPatch = serde_json::from_str(r#"{"archived_at": null}"#).unwrap();
         assert_eq!(p.archived_at, Some(None));
+    }
+
+    #[test]
+    fn memo_kind() {
+        assert_eq!(Kind::from_str("memo"), Kind::Memo);
+        assert_eq!(Kind::Memo.as_str(), "memo");
+        let w: Want = serde_json::from_str(
+            r#"{"id":"1","title":"t","kind":"memo","axis_hi":true,"clau":false,"created_at":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(w.kind, Kind::Memo);
+        assert_eq!(w.quadrant_label(), "");
+        assert!(!Kind::ALL.contains(&Kind::Memo));
     }
 
     #[test]

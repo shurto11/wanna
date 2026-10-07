@@ -40,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(f, app, tabs);
     match app.screen {
         Screen::List => draw_grid(f, app, main),
-        Screen::Done | Screen::Archive => draw_past(f, app, main),
+        Screen::Done | Screen::Archive | Screen::Memo => draw_past(f, app, main),
     }
     if let Some(side) = side {
         draw_sidebar(f, app, side);
@@ -49,7 +49,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_popup(f, app);
 }
 
-/// Want / Must / Done / Archive の切り替え位置を出す。
+/// Want / Must / Done / Archive / Memo の切り替え位置を出す。
 /// 囲みの `[` `]` がそのまま切り替えのキー
 fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
     let on = Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD);
@@ -61,6 +61,7 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         (Kind::Task.label(), selected(Kind::Task)),
         (DONE, app.screen == Screen::Done),
         (ARCHIVE, app.screen == Screen::Archive),
+        (Kind::Memo.label(), app.screen == Screen::Memo),
     ] {
         spans.push(Span::styled(format!(" {name} "), if sel { on } else { off }));
         spans.push(Span::raw(" "));
@@ -183,28 +184,36 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
     }
 }
 
-/// やったこと / 保管庫。日付はやった日 / しまった日
+/// やったこと / 保管庫 / メモ。日付はやった日 / しまった日 / 作った日
 fn draw_past(f: &mut Frame, app: &mut App, area: Rect) {
-    let archive = app.screen == Screen::Archive;
-    let (list, name) = if archive { (app.archived(), ARCHIVE) } else { (app.done(), DONE) };
+    let screen = app.screen;
+    let (list, name) = match screen {
+        Screen::Archive => (app.archived(), ARCHIVE),
+        Screen::Memo => (app.memos(), Kind::Memo.label()),
+        _ => (app.done(), DONE),
+    };
+    let memo = screen == Screen::Memo;
     let title_width = list.iter().map(|w| w.title.width()).max().unwrap_or(0).min(40);
     let items: Vec<ListItem> = list
         .iter()
         .map(|w| {
-            let date = if archive { &w.archived_at } else { &w.done_at }
-                .as_deref()
-                .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
-                .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "----------".into());
-            let title = pad(&truncate(&w.title, title_width), title_width);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("  {date}  "), Style::new().fg(DIM)),
-                Span::raw(title),
-                Span::styled(
+            let date = match screen {
+                Screen::Archive => w.archived_at.as_deref(),
+                Screen::Memo => Some(w.created_at.as_str()),
+                _ => w.done_at.as_deref(),
+            };
+            let date = date.map(local_date).unwrap_or_else(|| "----------".into());
+            let mut spans = vec![Span::styled(format!("  {date}  "), Style::new().fg(DIM))];
+            if memo {
+                spans.push(Span::raw(w.title.clone()));
+            } else {
+                spans.push(Span::raw(pad(&truncate(&w.title, title_width), title_width)));
+                spans.push(Span::styled(
                     format!("  ({} / {})", w.kind.label(), w.quadrant_label()),
                     Style::new().fg(DIM),
-                ),
-            ]))
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let empty = list.is_empty();
@@ -223,11 +232,21 @@ fn draw_past(f: &mut Frame, app: &mut App, area: Rect) {
             area.inner(ratatui::layout::Margin::new(1, 1)),
         );
     } else {
-        let state = if archive { &mut app.archive_list } else { &mut app.done_list };
+        let state = match screen {
+            Screen::Archive => &mut app.archive_list,
+            Screen::Memo => &mut app.memo_list,
+            _ => &mut app.done_list,
+        };
         f.render_stateful_widget(widget, area, state);
     }
 }
 
+/// RFC3339 を手元の日付 (YYYY-MM-DD) にする。読めなければ ----------
+fn local_date(d: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(d)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| "----------".into())
+}
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
@@ -242,12 +261,14 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn detail(w: &Want) -> Vec<Line<'static>> {
+    let sub = if w.kind.is_list() {
+        format!("{} / {}", w.kind.label(), w.quadrant_label())
+    } else {
+        format!("{} / {}", w.kind.label(), local_date(&w.created_at))
+    };
     let mut lines = vec![
         Line::from(Span::styled(w.title.clone(), Style::new().bold())),
-        Line::from(Span::styled(
-            format!("{} / {}", w.kind.label(), w.quadrant_label()),
-            Style::new().fg(ACCENT),
-        )),
+        Line::from(Span::styled(sub, Style::new().fg(ACCENT))),
     ];
     if let Some(d) = w.due() {
         let now = chrono::Local::now().naive_local();
@@ -292,11 +313,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 (Screen::List, Kind::Task) => {
                     "[/]:切替 n:追加 e:編集 s:日時 m:メモ t:やった a:しまう d:削除 J/K:並べ替え X:Wantへ q:終了"
                 }
-                (Screen::List, Kind::Want) => {
+                (Screen::List, _) => {
                     "[/]:切替 n:追加 e:編集 m:メモ t:やった a:しまう d:削除 hjkl:移動 J/K:並べ替え X:Mustへ q:終了"
                 }
                 (Screen::Done, _) => "[/]:切替 j/k:移動 m:メモ u:やったを取り消す d:削除 q:終了",
                 (Screen::Archive, _) => "[/]:切替 j/k:移動 m:メモ u:リストに戻す t:やった d:削除 q:終了",
+                (Screen::Memo, _) => "[/]:切替 j/k:移動 n:追加 Enter/m:vimで開く e:名前 d:削除 q:終了",
             };
             spans.push(Span::styled(help, Style::new().fg(DIM)));
         }
@@ -347,14 +369,31 @@ fn draw_popup(f: &mut Frame, app: &App) {
         Mode::Add(input) => {
             let r = popup_area(area, 60, 5);
             f.render_widget(Clear, r);
-            let block = popup_block(&format!("{} に追加", app.kind.label()));
+            let memo = app.screen == Screen::Memo;
+            let kind = if memo { Kind::Memo } else { app.kind };
+            let block = popup_block(&format!("{} に追加", kind.label()));
             let inner = block.inner(r);
             f.render_widget(block, r);
             let [line, help] =
                 Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
             draw_field(f, "名前 ", input, true, line);
-            let h = format!("Enter:「{}」に追加  Esc:やめる", app.cur_q().label(app.kind));
+            let h = if memo {
+                "Enter:作って本文をエディタで開く  Esc:やめる".to_string()
+            } else {
+                format!("Enter:「{}」に追加  Esc:やめる", app.cur_q().label(app.kind))
+            };
             f.render_widget(Paragraph::new(h.fg(DIM)), help);
+        }
+        Mode::Rename { input, .. } => {
+            let r = popup_area(area, 60, 5);
+            f.render_widget(Clear, r);
+            let block = popup_block("名前を変える");
+            let inner = block.inner(r);
+            f.render_widget(block, r);
+            let [line, help] =
+                Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
+            draw_field(f, "名前 ", input, true, line);
+            f.render_widget(Paragraph::new("Enter:保存  Esc:やめる".fg(DIM)), help);
         }
         Mode::Edit(e) => draw_edit(f, e, area),
         Mode::ConfirmDelete { title, .. } => {

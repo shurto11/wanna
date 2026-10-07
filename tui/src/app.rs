@@ -14,6 +14,8 @@ pub enum Screen {
     Done,
     /// やってはいないが、リストに置くほどでもなくなったもの
     Archive,
+    /// 区分を持たないメモ。本文はエディタで書く
+    Memo,
 }
 
 /// 1行のテキスト入力
@@ -156,6 +158,8 @@ pub enum Mode {
     Add(TextInput),
     Edit(Edit),
     ConfirmDelete { id: String, title: String },
+    /// 名前だけを変える (メモ用)
+    Rename { id: String, input: TextInput },
 }
 
 pub struct App {
@@ -171,6 +175,7 @@ pub struct App {
     pub lists: [[ListState; 4]; 2],
     pub done_list: ListState,
     pub archive_list: ListState,
+    pub memo_list: ListState,
     pub message: Option<String>,
     pub quit: bool,
     pub editor: Option<EditorReq>,
@@ -198,6 +203,7 @@ impl App {
             lists: Default::default(),
             done_list: ListState::default(),
             archive_list: ListState::default(),
+            memo_list: ListState::default(),
             message: None,
             quit: false,
             editor: None,
@@ -215,6 +221,7 @@ impl App {
         }
         app.done_list.select(Some(0));
         app.archive_list.select(Some(0));
+        app.memo_list.select(Some(0));
         app.request_sync();
         Ok(app)
     }
@@ -251,18 +258,28 @@ impl App {
         v
     }
 
-    /// やったこと / 保管庫 の中身と選択行。リストの画面では None
+    /// メモ。作った日の降順
+    pub fn memos(&self) -> Vec<&Want> {
+        let mut v: Vec<&Want> =
+            self.wants.iter().filter(|w| !w.deleted && w.kind == Kind::Memo).collect();
+        v.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        v
+    }
+
+    /// やったこと / 保管庫 / メモ の中身と選択行。リストの画面では None
     fn past(&self) -> Option<(Vec<&Want>, usize)> {
         match self.screen {
             Screen::List => None,
             Screen::Done => Some((self.done(), self.done_list.selected().unwrap_or(0))),
             Screen::Archive => Some((self.archived(), self.archive_list.selected().unwrap_or(0))),
+            Screen::Memo => Some((self.memos(), self.memo_list.selected().unwrap_or(0))),
         }
     }
 
     fn past_list_mut(&mut self) -> &mut ListState {
         match self.screen {
             Screen::Archive => &mut self.archive_list,
+            Screen::Memo => &mut self.memo_list,
             _ => &mut self.done_list,
         }
     }
@@ -306,6 +323,9 @@ impl App {
         let len = self.archived().len();
         let s = self.archive_list.selected().unwrap_or(0);
         self.archive_list.select(Some(s.min(len.saturating_sub(1))));
+        let len = self.memos().len();
+        let s = self.memo_list.selected().unwrap_or(0);
+        self.memo_list.select(Some(s.min(len.saturating_sub(1))));
     }
 
     /// `id` のあるリスト・区分・行へカーソルを合わせる
@@ -514,11 +534,23 @@ impl App {
                 match self.screen {
                     Screen::List => self.key_list(key),
                     Screen::Done | Screen::Archive => self.key_past(key),
+                    Screen::Memo => self.key_memo(key),
                 }
                 return;
             }
             Mode::Add(mut input) => match key.code {
                 KeyCode::Esc => Mode::Normal,
+                // メモは作ったらそのまま本文をエディタで開く
+                KeyCode::Enter if !input.text.trim().is_empty() && self.screen == Screen::Memo => {
+                    let w = Want::new(input.text.trim(), Kind::Memo, false, false, String::new());
+                    let id = w.id.clone();
+                    self.commit(Op::Create { want: w });
+                    if let Some(i) = self.memos().iter().position(|w| w.id == id) {
+                        self.memo_list.select(Some(i));
+                    }
+                    self.editor = Some(EditorReq { id, text: String::new(), from_popup: false });
+                    Mode::Normal
+                }
                 KeyCode::Enter if !input.text.trim().is_empty() => {
                     let (kind, q) = (self.kind, self.cur_q());
                     let pos = self.tail_pos(kind, q);
@@ -606,14 +638,30 @@ impl App {
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => Mode::Normal,
                 _ => Mode::ConfirmDelete { id, title },
             },
+            Mode::Rename { id, mut input } => match key.code {
+                KeyCode::Esc => Mode::Normal,
+                KeyCode::Enter => {
+                    let title = input.text.trim();
+                    let changed = self.wants.iter().any(|w| w.id == id && w.title != title);
+                    if !title.is_empty() && changed {
+                        self.patch(&id, WantPatch { title: Some(title.to_string()), ..Default::default() });
+                    }
+                    Mode::Normal
+                }
+                _ => {
+                    input.handle(key);
+                    Mode::Rename { id, input }
+                }
+            },
         };
     }
 
     /// 外部エディタから戻ったとき
     pub fn on_editor(&mut self, req: EditorReq, res: Result<String>) {
+        let memo = self.wants.iter().any(|w| w.id == req.id && w.kind == Kind::Memo);
         let text = match res {
-            // テンプレートのまま閉じたら何も書かなかったことにする
-            Ok(t) if notes::is_blank(&t) => String::new(),
+            // テンプレートのまま閉じたら何も書かなかったことにする (メモにはテンプレートが無い)
+            Ok(t) if !memo && notes::is_blank(&t) => String::new(),
             Ok(t) => t,
             Err(e) => {
                 self.message = Some(format!("メモを編集できませんでした: {e:#}"));
@@ -636,7 +684,8 @@ impl App {
     /// 選択中のもののメモを外部エディタで開く
     fn edit_notes(&mut self) {
         if let Some(w) = self.selected() {
-            self.editor = Some(EditorReq { id: w.id.clone(), text: draft(&w.notes), from_popup: false });
+            let text = if w.kind == Kind::Memo { w.notes.clone() } else { draft(&w.notes) };
+            self.editor = Some(EditorReq { id: w.id.clone(), text, from_popup: false });
         }
     }
 
@@ -714,14 +763,15 @@ impl App {
         self.mode = Mode::Edit(e);
     }
 
-    /// 表示を Want → Must → Done → Archive の順に回す
+    /// 表示を Want → Must → Done → Archive → Memo の順に回す
     fn cycle_view(&mut self, forward: bool) {
         let cur = match self.screen {
             Screen::List => self.kind.index(),
             Screen::Done => 2,
             Screen::Archive => 3,
+            Screen::Memo => 4,
         };
-        match (cur + if forward { 1 } else { 3 }) % 4 {
+        match (cur + if forward { 1 } else { 4 }) % 5 {
             0 => {
                 self.screen = Screen::List;
                 self.kind = Kind::Want;
@@ -731,7 +781,8 @@ impl App {
                 self.kind = Kind::Task;
             }
             2 => self.screen = Screen::Done,
-            _ => self.screen = Screen::Archive,
+            3 => self.screen = Screen::Archive,
+            _ => self.screen = Screen::Memo,
         }
     }
 
@@ -875,6 +926,38 @@ impl App {
         }
     }
 
+    /// メモの画面
+    fn key_memo(&mut self, key: KeyEvent) {
+        let Some((list, sel)) = self.past() else { return };
+        let len = list.len();
+        match key.code {
+            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
+            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
+            KeyCode::Esc => self.screen = Screen::List,
+            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('r') => {
+                self.message = Some("同期中…".into());
+                self.request_sync();
+            }
+            KeyCode::Char('j') | KeyCode::Down if sel + 1 < len => self.memo_list.select(Some(sel + 1)),
+            KeyCode::Char('k') | KeyCode::Up if sel > 0 => self.memo_list.select(Some(sel - 1)),
+            KeyCode::Char('g') | KeyCode::Home => self.memo_list.select(Some(0)),
+            KeyCode::Char('G') | KeyCode::End => self.memo_list.select(Some(len.saturating_sub(1))),
+            KeyCode::Char('n') => self.mode = Mode::Add(TextInput::default()),
+            KeyCode::Char('m') | KeyCode::Enter => self.edit_notes(),
+            KeyCode::Char('e') => {
+                if let Some(w) = self.selected() {
+                    self.mode = Mode::Rename { id: w.id.clone(), input: TextInput::new(&w.title) };
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(w) = self.selected() {
+                    self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// エディタで開く中身。空ならテンプレートを入れておく

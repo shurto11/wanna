@@ -634,3 +634,138 @@ dialog::backdrop {
   color: var(--danger);
   font-size: 13px;
 }
+
+/* ───────── メモ ───────── */
+
+.memo-add input {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 14px;
+  background: transparent;
+  font: inherit;
+  color: var(--text);
+  outline: none;
+}
+
+.memo-add input:focus {
+  border-color: var(--accent);
+}
+
+.memo-row {
+  cursor: pointer;
+}
+
+.memo-row:hover,
+.memo-row:focus-visible {
+  background: var(--surface-2);
+  outline: none;
+}
+
+.memo-edit {
+  margin-top: 8px;
+}
+
+.memo-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.memo-head button {
+  border: 1px solid var(--line);
+  background: transparent;
+  border-radius: 8px;
+  padding: 4px 12px;
+}
+
+.memo-head .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--surface);
+}
+
+.memo-head .danger {
+  color: var(--danger);
+}
+
+.memo-title {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+}
+
+.memo-state {
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.memo-vim {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.memo-body {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.memo-body .cm-editor {
+  height: calc(100dvh - 200px);
+  min-height: 240px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.memo-body .cm-editor.cm-focused {
+  outline: none;
+}
+
+.memo-body .cm-scroller {
+  font: 14px/1.6 ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
+}
+
+.memo-body .cm-gutters {
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.memo-body .cm-activeLine,
+.memo-body .cm-activeLineGutter {
+  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+}
+
+.memo-body .cm-cursor {
+  border-left-color: var(--text);
+}
+
+/* vim のノーマルモードの箱型カーソル */
+.memo-body .cm-fat-cursor {
+  background: var(--accent) !important;
+  color: var(--surface) !important;
+}
+
+.memo-body .cm-panels {
+  background: var(--surface-2);
+  color: var(--text);
+  border-top: 1px solid var(--line);
+}
+
+.memo-body .cm-panels input {
+  color: var(--text);
+}

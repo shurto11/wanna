@@ -1,11 +1,14 @@
-/** どちらのリストのものか */
-export type Kind = "want" | "task";
+/** どのリストのものか。memo は区分・日時を持たず、名前と本文だけ使う */
+export type Kind = "want" | "task" | "memo";
 
-/** 画面上の並び */
+/** 区分で並べるリスト (画面上の並び)。メモは含まない */
 export const KINDS: Kind[] = ["want", "task"];
 
 /** リストの名前 */
-export const kindLabel = (k: Kind) => (k === "task" ? "Must" : "Want");
+export const kindLabel = (k: Kind) => (k === "task" ? "Must" : k === "memo" ? MEMO_LABEL : "Want");
+
+/** メモの名前 (5つめ) */
+export const MEMO_LABEL = "Memo";
 
 /** やったことリストの名前 (kindLabel と並ぶ3つめ) */
 export const DONE_LABEL = "Done";

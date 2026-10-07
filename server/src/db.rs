@@ -9,12 +9,15 @@ CREATE TABLE IF NOT EXISTS rev_counter (
   rev INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO rev_counter (id, rev) VALUES (0, 0);
+"#;
 
-CREATE TABLE IF NOT EXISTS wants (
+/// `{name}` を置き換えて使う (作り直すときに別名で作るため)
+const WANTS_TABLE: &str = r#"
+CREATE TABLE IF NOT EXISTS {name} (
   id         TEXT    PRIMARY KEY,
   title      TEXT    NOT NULL,
   notes      TEXT    NOT NULL DEFAULT '',
-  kind       TEXT    NOT NULL DEFAULT 'want' CHECK (kind IN ('want', 'task')),
+  kind       TEXT    NOT NULL DEFAULT 'want' CHECK (kind IN ('want', 'task', 'memo')),
   axis_hi    INTEGER NOT NULL CHECK (axis_hi IN (0, 1)),
   clau       INTEGER NOT NULL CHECK (clau    IN (0, 1)),
   pos        TEXT    NOT NULL,
@@ -25,7 +28,9 @@ CREATE TABLE IF NOT EXISTS wants (
   rev        INTEGER NOT NULL,
   created_at TEXT    NOT NULL
 );
+"#;
 
+const INDEXES: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_wants_rev  ON wants(rev);
 CREATE INDEX IF NOT EXISTS idx_wants_list ON wants(kind, axis_hi, clau, pos);
 CREATE INDEX IF NOT EXISTS idx_wants_done ON wants(done_at);
@@ -41,9 +46,16 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    migrate(&conn)?;
-    conn.execute_batch(SCHEMA)?;
+    init(&conn)?;
     Ok(conn)
+}
+
+fn init(conn: &Connection) -> Result<()> {
+    migrate(conn)?;
+    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(&WANTS_TABLE.replace("{name}", "wants"))?;
+    conn.execute_batch(INDEXES)?;
+    Ok(())
 }
 
 /// 「次にやること」を入れる前の DB を今の形にする。新規の DB では何もしない。
@@ -70,6 +82,23 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     if !cols.iter().any(|c| c == "archived_at") {
         conn.execute_batch("ALTER TABLE wants ADD COLUMN archived_at TEXT;")?;
+    }
+    // kind の CHECK に memo を足す。SQLite は CHECK を変えられないので作り直す
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wants'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !sql.contains("'memo'") {
+        conn.execute_batch(&format!(
+            "BEGIN;
+             {}
+             INSERT INTO wants_new ({COLUMNS}) SELECT {COLUMNS} FROM wants;
+             DROP TABLE wants;
+             ALTER TABLE wants_new RENAME TO wants;
+             COMMIT;",
+            WANTS_TABLE.replace("{name}", "wants_new")
+        ))?;
     }
     Ok(())
 }
@@ -250,7 +279,7 @@ mod tests {
 
     fn mem() -> Connection {
         let c = Connection::open_in_memory().unwrap();
-        c.execute_batch(SCHEMA).unwrap();
+        init(&c).unwrap();
         c
     }
 
@@ -390,6 +419,9 @@ mod tests {
         // 開いたあとは新しい列も普通に使える
         let t = upsert(&mut c, new("b", Kind::Task, false, true)).unwrap();
         assert_eq!(t.kind, Kind::Task);
+        let m = upsert(&mut c, new("m", Kind::Memo, true, false)).unwrap();
+        assert_eq!(m.kind, Kind::Memo);
+        assert_eq!(get(&c, "a").unwrap().unwrap().title, "古い1件");
         drop(c);
         std::fs::remove_dir_all(&dir).unwrap();
     }
