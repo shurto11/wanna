@@ -692,21 +692,8 @@ dialog::backdrop {
   color: var(--danger);
 }
 
-.memo-title {
-  flex: 1 1 200px;
-  min-width: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-weight: 600;
-}
-
-.memo-state {
-  color: var(--warn);
-  font-size: 12px;
+.memo-head #memo-back {
+  margin-right: auto;
 }
 
 .memo-vim {
@@ -717,55 +704,352 @@ dialog::backdrop {
   font-size: 13px;
 }
 
-.memo-body {
+/* ───────── vim の窓 (~/.vimrc の habamax + vim-airline) ───────── */
+
+.vimwin {
+  /* habamax */
+  --hb-bg: #1c1c1c; /* Normal */
+  --hb-fg: #bcbcbc;
+  --hb-nontext: #585858; /* LineNr EndOfBuffer */
+  --hb-cursorline: #303030; /* CursorLine */
+  --hb-cursorlinenr: #ffaf5f; /* CursorLineNr Cursor */
+  /* フォーカスが外れたら全部この2色に潰す (.vimrc の DimOn。tmux の window-style と同じ色) */
+  --dim-fg: #a8a8a8;
+  --dim-bg: #303030;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
+  container-type: inline-size;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
+  border-radius: 8px;
   overflow: hidden;
+  background: var(--hb-bg);
+  color: var(--hb-fg);
+  font: 14px/22px var(--mono);
+}
+
+/* airline の tabline。名前はここで書き換える */
+.vim-tabline {
+  display: flex;
+  background: #202020; /* airline_tabfill */
+  white-space: pre;
+}
+
+.vim-tab,
+.vim-tabend {
+  background: #dfff00; /* airline_tabsel */
+  color: #00005f;
+}
+
+.modified .vim-tab,
+.modified .vim-tabend {
+  background: #00dfff; /* airline_tabmod */
+}
+
+.vim-tab {
+  field-sizing: content;
+  min-width: 4ch;
+  max-width: 70%;
+  margin: 0;
+  padding: 0 0 0 1ch;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  outline: none;
+}
+
+.vim-tabend {
+  padding-right: 1ch;
+}
+
+.modified .vim-tabend::before {
+  content: "+";
+}
+
+.vim-tabfill {
+  flex: 1;
+}
+
+.vim-tabtype {
+  padding: 0 1ch;
+  background: #ffaf00; /* airline_tabtype */
+  color: #000000;
 }
 
 .memo-body .cm-editor {
-  height: calc(100dvh - 200px);
-  min-height: 240px;
-  background: var(--surface);
-  color: var(--text);
+  height: calc(100dvh - 220px);
+  min-height: 260px;
+  background: var(--hb-bg);
+  color: var(--hb-fg);
 }
 
 .memo-body .cm-editor.cm-focused {
   outline: none;
 }
 
+/* 文書の後ろの行に EndOfBuffer の ~ を並べる。行番号の欄が文書の行だけを塗りつぶす */
 .memo-body .cm-scroller {
-  font: 14px/1.6 ui-monospace, "SFMono-Regular", Menlo, "Noto Sans Mono CJK JP", monospace;
+  font: inherit;
+  background: var(--hb-bg)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='22'%3E%3Ctext x='0' y='15' fill='%23585858' font-family='monospace' font-size='14'%3E~%3C/text%3E%3C/svg%3E")
+    4px 0 / 10px 22px repeat-y local;
+}
+
+.memo-body .cm-content {
+  padding: 0;
 }
 
 .memo-body .cm-gutters {
-  background: var(--surface-2);
-  border-right: 1px solid var(--line);
-  color: var(--muted);
+  background: transparent;
+  border: none;
+  color: var(--hb-nontext);
 }
 
-.memo-body .cm-activeLine,
+/* set number。numberwidth=4 なので3桁と空白1つ */
+.memo-body .cm-lineNumbers .cm-gutterElement {
+  min-width: 4ch;
+  padding: 0 1ch 0 4px;
+  background: var(--hb-bg);
+}
+
+/* set cursorline */
+.memo-body .cm-activeLine {
+  background: var(--hb-cursorline);
+}
+
 .memo-body .cm-activeLineGutter {
-  background: color-mix(in srgb, var(--accent-soft) 45%, transparent);
+  color: var(--hb-cursorlinenr);
+  font-weight: bold;
 }
 
 .memo-body .cm-cursor {
-  border-left-color: var(--text);
+  border-left: 2px solid var(--hb-cursorlinenr);
 }
 
-/* vim のノーマルモードの箱型カーソル */
+/* vim のノーマルモードの箱型カーソル (Cursor) */
 .memo-body .cm-fat-cursor {
-  background: var(--accent) !important;
-  color: var(--surface) !important;
+  background: var(--hb-cursorlinenr) !important;
+  color: var(--hb-bg) !important;
+}
+
+/* Visual */
+.memo-body .cm-selectionBackground {
+  background: #87afaf !important;
+}
+
+.memo-body .cm-visualText,
+.memo-body .cm-visualText * {
+  color: var(--hb-bg) !important;
+}
+
+/* MatchParen (set showmatch) */
+.memo-body .cm-matchingBracket {
+  background: none !important;
+  color: #ff00af !important;
+  font-weight: bold;
+}
+
+.memo-body .cm-nonmatchingBracket {
+  background: none !important;
+}
+
+/* Search / CurSearch */
+.memo-body .cm-searchMatch {
+  background: #87af87 !important;
+}
+
+.memo-body .cm-searchMatch-selected {
+  background: #afaf87 !important;
+}
+
+.memo-body .cm-searchMatch,
+.memo-body .cm-searchMatch * {
+  color: var(--hb-bg) !important;
 }
 
 .memo-body .cm-panels {
-  background: var(--surface-2);
-  color: var(--text);
-  border-top: 1px solid var(--line);
+  background: var(--hb-bg);
+  color: var(--hb-fg);
+  border-top: none !important;
 }
 
 .memo-body .cm-panels input {
-  color: var(--text);
+  color: var(--hb-fg);
+  font: inherit;
+}
+
+/* vim のコマンド行と showmode の行 */
+.memo-body .cm-vim-panel,
+.memo-body .cm-cmdline {
+  min-height: 22px;
+  padding: 0;
+  font: inherit;
+  white-space: pre;
+}
+
+.memo-body .cm-cmdline:empty::before {
+  content: " ";
+}
+
+/* ModeMsg。-- INSERT -- などの文言の部分だけ塗る */
+.memo-body .cm-cmdline:not(:empty) {
+  width: fit-content;
+  background: #d7d787;
+  color: var(--hb-bg);
+}
+
+/* ErrorMsg。codemirror-vim は赤字で出すので塗り直す */
+.memo-body .cm-vim-message {
+  width: fit-content;
+  background: #d75f5f;
+  color: var(--hb-bg) !important;
+}
+
+/* "3 lines yanked" などのただの知らせ */
+.memo-body .cm-vim-message.cm-vim-info {
+  background: none;
+  color: var(--hb-fg) !important;
+}
+
+/* syntax/markdown.vim のグループを habamax の色で */
+.hb-title {
+  color: #d7d787;
+  font-weight: bold;
+}
+.hb-special {
+  color: #5f8787;
+  font-weight: normal;
+}
+.hb-preproc {
+  color: #afaf87;
+  font-weight: normal;
+}
+.hb-statement {
+  color: #af87af;
+}
+.hb-comment {
+  color: #767676;
+}
+.hb-string {
+  color: #87af87;
+}
+.hb-type {
+  color: #87afd7;
+}
+.hb-italic {
+  font-style: italic;
+}
+.hb-bold {
+  font-weight: bold;
+}
+.hb-link {
+  text-decoration: underline;
+}
+.hb-link.hb-linkmark,
+.hb-link.hb-string {
+  text-decoration: none;
+}
+
+/* airline の statusline。色は dark テーマ (habamax 用のテーマが無いのでこれになる) */
+.cm-airline {
+  --al-a-fg: #00005f;
+  --al-a-bg: #dfff00;
+  --al-b-fg: #ffffff;
+  --al-b-bg: #444444;
+  --al-c-fg: #9cffd3;
+  --al-c-bg: #202020;
+  display: flex;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.cm-airline[data-mode="insert"],
+.cm-airline[data-mode="replace"] {
+  --al-a-bg: #00dfff;
+  --al-b-bg: #005fff;
+  --al-c-fg: #ffffff;
+  --al-c-bg: #000080;
+}
+
+.cm-airline[data-mode="replace"] {
+  --al-a-fg: #ffffff;
+  --al-a-bg: #af0000;
+}
+
+.cm-airline[data-mode="visual"],
+.cm-airline[data-mode="vline"],
+.cm-airline[data-mode="vblock"] {
+  --al-a-fg: #000000;
+  --al-a-bg: #ffaf00;
+  --al-b-fg: #000000;
+  --al-b-bg: #ff5f00;
+  --al-c-fg: #ffffff;
+  --al-c-bg: #5f0000;
+}
+
+.cm-airline[data-mode="command"] {
+  --al-a-bg: #00d700;
+}
+
+.cm-airline > span {
+  padding: 0 1ch;
+}
+
+.al-a,
+.al-z {
+  color: var(--al-a-fg);
+  background: var(--al-a-bg);
+}
+
+.al-a {
+  font-weight: bold;
+}
+
+.al-c,
+.al-x {
+  color: var(--al-c-fg);
+  background: var(--al-c-bg);
+}
+
+.al-c {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.al-modified .al-c {
+  color: #ffffff;
+  background: #5f005f;
+}
+
+.al-y {
+  color: var(--al-b-fg);
+  background: var(--al-b-bg);
+}
+
+/* 幅が足りないと airline は y → x の順に畳む */
+@container (max-width: 740px) {
+  .al-y {
+    display: none;
+  }
+}
+
+@container (max-width: 500px) {
+  .al-x {
+    display: none;
+  }
+}
+
+/* フォーカスが外れたら全部のハイライトを平坦にする (.vimrc の DimOn) */
+.vimwin:not(:focus-within),
+.vimwin:not(:focus-within) * {
+  color: var(--dim-fg) !important;
+  background-color: var(--dim-bg) !important;
+  font-weight: normal !important;
+  font-style: normal !important;
+  text-decoration: none !important;
+}
+
+/* 裏に回った tmux のペインと同じく、カーソルも出さない */
+.vimwin:not(:focus-within) .cm-fat-cursor {
+  visibility: hidden;
 }

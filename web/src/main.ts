@@ -79,13 +79,19 @@ document.querySelector("#app")!.innerHTML = `
     <div id="memo-edit" class="memo-edit" hidden>
       <div class="memo-head">
         <button type="button" id="memo-back" class="ghost-btn">← 一覧</button>
-        <input id="memo-title" class="memo-title" aria-label="名前" autocomplete="off" />
-        <span id="memo-state" class="memo-state"></span>
         <label class="memo-vim"><input type="checkbox" id="memo-vim" /> vim</label>
         <button type="button" id="memo-save" class="primary">保存</button>
         <button type="button" id="memo-del" class="danger">削除</button>
       </div>
-      <div id="memo-body" class="memo-body"></div>
+      <div id="memo-win" class="vimwin">
+        <div class="vim-tabline">
+          <input id="memo-title" class="vim-tab" aria-label="名前" autocomplete="off" spellcheck="false" />
+          <span class="vim-tabend" aria-hidden="true"></span>
+          <span class="vim-tabfill"></span>
+          <span class="vim-tabtype">buffers</span>
+        </div>
+        <div id="memo-body" class="memo-body"></div>
+      </div>
       <p class="hint" id="memo-hint">:w 保存 · :q 一覧へ戻る · :wq 保存して戻る</p>
     </div>
   </section>
@@ -350,8 +356,8 @@ function renderPast(list: HTMLOListElement, items: Want[], at: (w: Want) => stri
 const memoList = $<HTMLOListElement>("#memo-list");
 const memoIndex = $<HTMLDivElement>("#memo-index");
 const memoEdit = $<HTMLDivElement>("#memo-edit");
+const memoWin = $<HTMLDivElement>("#memo-win");
 const memoTitle = $<HTMLInputElement>("#memo-title");
-const memoState = $<HTMLSpanElement>("#memo-state");
 const memoVim = $<HTMLInputElement>("#memo-vim");
 const memoHint = $<HTMLParagraphElement>("#memo-hint");
 let memo: { id: string; editor: MemoEditor } | null = null;
@@ -391,8 +397,10 @@ function renderMemos() {
   );
 }
 
+/** 変更の有無をタブラインと statusline に出す (vim の 'modified') */
 function setMemoDirty(dirty: boolean) {
-  memoState.textContent = dirty ? "未保存" : "";
+  memoWin.classList.toggle("modified", dirty);
+  memo?.editor.setFile(memoTitle.value.trim(), dirty);
 }
 
 async function openMemo(id: string) {

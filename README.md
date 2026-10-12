@@ -123,7 +123,7 @@ ID は全体か末尾の一部（`ls` の左端）。`@` はこのディレク�
 |---|---|
 | `tui/` | TUI とコマンドライン (`wanna`)。手元のキャッシュは `~/.config/wanna/cache.db` |
 | `server/` | バックエンド (`wannad`)。SQLite に保存し、SSE で変更を知らせる。ブラウザ版を埋め込んで配る |
-| `web/` | ブラウザ版 (TypeScript + Vite, PWA)。Memo は CodeMirror 6 の vim モードで書ける |
+| `web/` | ブラウザ版 (TypeScript + Vite, PWA)。Memo は CodeMirror 6 の vim モードで書け、キー操作と見た目は `~/.vimrc`（habamax + vim-airline）に寄せている |
 | `core/` | 共有部分（モデル・日時・並び順・API クライアント） |
 | `migrate/` | Google Tasks からの一度きりの移行 |
 | `deploy/` | systemd のユニット、デプロイとバックアップのスクリプト |
