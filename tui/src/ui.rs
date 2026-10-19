@@ -1,6 +1,7 @@
-use crate::app::{App, Edit, EditField, Mode, Screen, TextInput};
+use crate::app::{help_lines, matches, App, Edit, EditField, Mode, Screen, HELP};
+use crate::input::TextInput;
 use ratatui::{
-    layout::{Constraint, Layout, Position, Rect},
+    layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -14,6 +15,8 @@ const DIM: Color = Color::DarkGray;
 /// 日時が過ぎている / 今日
 const OVER: Color = Color::Red;
 const TODAY: Color = Color::Yellow;
+/// ビジュアルモードで選んでいる行
+const VISUAL: Color = Color::Blue;
 
 /// やったことリストの名前 (Kind::label と並ぶ3つめ)
 const DONE: &str = "Done";
@@ -46,6 +49,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_sidebar(f, app, side);
     }
     draw_status(f, app, status);
+    // キー一覧は見えている高さより先へスクロールさせない
+    if let Mode::Help(scroll) = &mut app.mode {
+        let rows = help_area(area).height.saturating_sub(2) as usize;
+        *scroll = (*scroll).min(help_lines().saturating_sub(rows) as u16);
+    }
     draw_popup(f, app);
 }
 
@@ -133,16 +141,21 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
     let dues: Vec<Option<String>> =
         list.iter().map(|w| w.due().map(|d| due::format(d, now.date()))).collect();
     let due_w = dues.iter().flatten().map(|d| d.width()).max().unwrap_or(0);
+    // 行番号 (`5G` で飛べる)。~/.vimrc の `number` と同じく全行に出す
+    let num_w = list.len().to_string().len().max(2);
     let inner_width = area.width.saturating_sub(2) as usize;
-    let title_width = inner_width.saturating_sub(4 + if due_w > 0 { due_w + 1 } else { 0 });
+    let title_width = inner_width.saturating_sub(num_w + 2 + if due_w > 0 { due_w + 1 } else { 0 });
+    let visual = if focused { app.visual_range() } else { None };
+    let query = app.search.clone();
 
     let items: Vec<ListItem> = list
         .iter()
         .zip(&dues)
         .enumerate()
         .map(|(i, (w, d))| {
-            let num = if i < 10 { format!("{:>2} ", (i + 1) % 10) } else { "   ".to_string() };
-            let mut spans = vec![Span::styled(num, Style::new().fg(DIM))];
+            let in_visual = visual.as_ref().is_some_and(|r| r.contains(&i));
+            let num_style = if in_visual { Style::new() } else { Style::new().fg(DIM) };
+            let mut spans = vec![Span::styled(format!("{:>num_w$} ", i + 1), num_style)];
             if due_w > 0 {
                 let text = pad(d.as_deref().unwrap_or(""), due_w);
                 let style = match w.due().map(|s| due::state(s, now)) {
@@ -156,11 +169,14 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
             if !w.notes.is_empty() && title.width() + 2 <= title_width.saturating_sub(1) {
                 title.push_str(" …");
             }
-            spans.push(Span::raw(title));
-            ListItem::new(Line::from(spans))
+            spans.extend(title_spans(title, query.as_deref()));
+            item(spans, in_visual)
         })
         .collect();
     let empty = list.is_empty();
+    if focused {
+        app.view_rows = area.height.saturating_sub(2) as usize;
+    }
 
     let border = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(DIM) };
     let block = Block::default()
@@ -194,29 +210,33 @@ fn draw_past(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let memo = screen == Screen::Memo;
     let title_width = list.iter().map(|w| w.title.width()).max().unwrap_or(0).min(40);
+    let visual = app.visual_range();
+    let query = app.search.clone();
     let items: Vec<ListItem> = list
         .iter()
-        .map(|w| {
+        .enumerate()
+        .map(|(i, w)| {
+            let in_visual = visual.as_ref().is_some_and(|r| r.contains(&i));
             let date = match screen {
                 Screen::Archive => w.archived_at.as_deref(),
                 Screen::Memo => Some(w.created_at.as_str()),
                 _ => w.done_at.as_deref(),
             };
             let date = date.map(local_date).unwrap_or_else(|| "----------".into());
-            let mut spans = vec![Span::styled(format!("  {date}  "), Style::new().fg(DIM))];
+            let dim = if in_visual { Style::new() } else { Style::new().fg(DIM) };
+            let mut spans = vec![Span::styled(format!("  {date}  "), dim)];
             if memo {
-                spans.push(Span::raw(w.title.clone()));
+                spans.extend(title_spans(w.title.clone(), query.as_deref()));
             } else {
-                spans.push(Span::raw(pad(&truncate(&w.title, title_width), title_width)));
-                spans.push(Span::styled(
-                    format!("  ({} / {})", w.kind.label(), w.quadrant_label()),
-                    Style::new().fg(DIM),
-                ));
+                let title = pad(&truncate(&w.title, title_width), title_width);
+                spans.extend(title_spans(title, query.as_deref()));
+                spans.push(Span::styled(format!("  ({} / {})", w.kind.label(), w.quadrant_label()), dim));
             }
-            ListItem::new(Line::from(spans))
+            item(spans, in_visual)
         })
         .collect();
     let empty = list.is_empty();
+    app.view_rows = area.height.saturating_sub(2) as usize;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -239,6 +259,38 @@ fn draw_past(f: &mut Frame, app: &mut App, area: Rect) {
         };
         f.render_stateful_widget(widget, area, state);
     }
+}
+
+/// 一覧の1行。ビジュアルモードで選んでいれば色を付ける
+fn item(spans: Vec<Span<'static>>, in_visual: bool) -> ListItem<'static> {
+    let item = ListItem::new(Line::from(spans));
+    if in_visual {
+        item.style(Style::new().bg(VISUAL).fg(Color::White))
+    } else {
+        item
+    }
+}
+
+/// 名前。検索語に合うところを目立たせる (vim の hlsearch)
+fn title_spans(title: String, query: Option<&str>) -> Vec<Span<'static>> {
+    let ranges = query.map(|q| matches(&title, q)).unwrap_or_default();
+    if ranges.is_empty() {
+        return vec![Span::raw(title)];
+    }
+    let hit = Style::new().fg(Color::Black).bg(TODAY);
+    let mut spans = Vec::new();
+    let mut last = 0;
+    for r in ranges {
+        if r.start > last {
+            spans.push(Span::raw(title[last..r.start].to_string()));
+        }
+        spans.push(Span::styled(title[r.clone()].to_string(), hit));
+        last = r.end;
+    }
+    if last < title.len() {
+        spans.push(Span::raw(title[last..].to_string()));
+    }
+    spans
 }
 
 /// RFC3339 を手元の日付 (YYYY-MM-DD) にする。読めなければ ----------
@@ -292,6 +344,12 @@ fn detail(w: &Want) -> Vec<Line<'static>> {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    // `/` `:` を打っている間は vim のコマンドラインと同じく1行まるごと使う
+    match &app.mode {
+        Mode::Search(input) => return draw_field(f, "/", input, true, area),
+        Mode::Command(input) => return draw_field(f, ":", input, true, area),
+        _ => {}
+    }
     let conn = if !app.has_remote() {
         Span::styled(" ローカルのみ ", Style::new().fg(Color::Black).bg(Color::Gray))
     } else {
@@ -306,24 +364,42 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(format!(" 未送信 {} ", app.outbox_len), Style::new().fg(Color::Yellow)));
     }
     spans.push(Span::raw(" "));
+    if matches!(app.mode, Mode::Visual { .. }) {
+        spans.push(Span::styled("-- VISUAL -- ", Style::new().fg(ACCENT).bold()));
+    }
     match &app.message {
         Some(m) => spans.push(Span::styled(m.clone(), Style::new().fg(ACCENT))),
-        None => {
-            let help = match (app.screen, app.kind) {
-                (Screen::List, Kind::Task) => {
-                    "[/]:切替 n:追加 e:編集 s:日時 m:メモ t:やった a:しまう d:削除 J/K:並べ替え X:Wantへ q:終了"
-                }
-                (Screen::List, _) => {
-                    "[/]:切替 n:追加 e:編集 m:メモ t:やった a:しまう d:削除 hjkl:移動 J/K:並べ替え X:Mustへ q:終了"
-                }
-                (Screen::Done, _) => "[/]:切替 j/k:移動 m:メモ u:やったを取り消す d:削除 q:終了",
-                (Screen::Archive, _) => "[/]:切替 j/k:移動 m:メモ u:リストに戻す t:やった d:削除 q:終了",
-                (Screen::Memo, _) => "[/]:切替 j/k:移動 n:追加 Enter/m:vimで開く e:名前 d:削除 q:終了",
-            };
-            spans.push(Span::styled(help, Style::new().fg(DIM)));
-        }
+        None => spans.push(Span::styled(footer(app), Style::new().fg(DIM))),
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    // 打ちかけのカウントと前置キーは右端に出す (vim の showcmd)
+    let pending = app.pending.show();
+    let [left, right] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(pending.width() as u16 + 1)])
+            .areas(area);
+    f.render_widget(Paragraph::new(Line::from(spans)), left);
+    f.render_widget(Paragraph::new(pending).alignment(Alignment::Right), right);
+}
+
+/// フッターに出すキー。全部は `?` で出す
+fn footer(app: &App) -> &'static str {
+    let visual = matches!(app.mode, Mode::Visual { .. });
+    match (app.screen, visual) {
+        (Screen::List, true) => {
+            "j/k:範囲 t:やった a:しまう d:削除 J/K:並べ替え H/L:左右へ X:もう一方へ Esc:やめる"
+        }
+        (Screen::Done, true) => "j/k:範囲 p:リストに戻す d:削除 Esc:やめる",
+        (Screen::Archive, true) => "j/k:範囲 p:リストに戻す t:やった d:削除 Esc:やめる",
+        (Screen::Memo, true) => "j/k:範囲 d:削除 Esc:やめる",
+        (Screen::List, false) if app.kind == Kind::Task => {
+            "o:追加 c:編集 s:日時 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 HJKL:動かす X:Wantへ v:選択 /:検索 ?:ヘルプ"
+        }
+        (Screen::List, false) => {
+            "o:追加 c:編集 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 HJKL:動かす X:Mustへ v:選択 /:検索 ?:ヘルプ"
+        }
+        (Screen::Done, false) => "m:メモ p:やったを取り消す dd:削除 u:取消 v:選択 /:検索 ?:ヘルプ",
+        (Screen::Archive, false) => "m:メモ p:リストに戻す t:やった dd:削除 u:取消 v:選択 /:検索 ?:ヘルプ",
+        (Screen::Memo, false) => "o:追加 Enter:vimで開く c:名前 dd:削除 p:貼る u:取消 /:検索 ?:ヘルプ",
+    }
 }
 
 fn popup_area(area: Rect, width: u16, height: u16) -> Rect {
@@ -365,8 +441,8 @@ fn choice(label: &str, a: &str, b: &str, first: bool, focused: bool) -> Line<'st
 fn draw_popup(f: &mut Frame, app: &App) {
     let area = f.area();
     match &app.mode {
-        Mode::Normal => {}
-        Mode::Add(input) => {
+        Mode::Normal | Mode::Visual { .. } | Mode::Search(_) | Mode::Command(_) => {}
+        Mode::Add { input, at } => {
             let r = popup_area(area, 60, 5);
             f.render_widget(Clear, r);
             let memo = app.screen == Screen::Memo;
@@ -378,46 +454,31 @@ fn draw_popup(f: &mut Frame, app: &App) {
                 Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
             draw_field(f, "名前 ", input, true, line);
             let h = if memo {
-                "Enter:作って本文をエディタで開く  Esc:やめる".to_string()
+                "Enter/Esc:作って本文をエディタで開く  Ctrl+C:やめる".to_string()
             } else {
-                format!("Enter:「{}」に追加  Esc:やめる", app.cur_q().label(app.kind))
+                format!("Enter/Esc:「{}」の {} 番目に追加  Ctrl+C:やめる", app.cur_q().label(app.kind), at + 1)
             };
             f.render_widget(Paragraph::new(h.fg(DIM)), help);
         }
-        Mode::Rename { input, .. } => {
-            let r = popup_area(area, 60, 5);
-            f.render_widget(Clear, r);
-            let block = popup_block("名前を変える");
-            let inner = block.inner(r);
-            f.render_widget(block, r);
-            let [line, help] =
-                Layout::vertical([Constraint::Length(2), Constraint::Length(1)]).areas(inner);
-            draw_field(f, "名前 ", input, true, line);
-            f.render_widget(Paragraph::new("Enter:保存  Esc:やめる".fg(DIM)), help);
-        }
         Mode::Edit(e) => draw_edit(f, e, area),
-        Mode::ConfirmDelete { title, .. } => {
-            let r = popup_area(area, 50, 5);
-            f.render_widget(Clear, r);
-            let text = vec![
-                Line::from(truncate(title, 44).bold()),
-                Line::from("削除しますか？ (y/n)"),
-            ];
-            f.render_widget(Paragraph::new(text).block(popup_block("削除")), r);
-        }
+        Mode::Help(scroll) => draw_help(f, *scroll, area),
     }
 }
 
 fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
+    let memo = e.kind == Kind::Memo;
     let has_due = e.kind.has_due();
-    let height = 16 + u16::from(has_due) * 2 + u16::from(e.error.is_some());
+    let height = 16 + u16::from(has_due) * 2 + u16::from(e.error.is_some()) - u16::from(memo) * 3;
     let r = popup_area(area, 70, height);
     f.render_widget(Clear, r);
     let block = popup_block(&format!("{} を編集", e.kind.label()));
     let inner = block.inner(r);
     f.render_widget(block, r);
 
-    let mut rows = vec![Constraint::Length(2), Constraint::Length(3)];
+    let mut rows = vec![Constraint::Length(2)];
+    if !memo {
+        rows.push(Constraint::Length(3));
+    }
     if has_due {
         rows.push(Constraint::Length(2));
     }
@@ -430,23 +491,27 @@ fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
     let mut next = rects.iter().copied();
     let mut take = || next.next().unwrap_or(inner);
 
-    draw_field(f, "名前 ", &e.title, e.field == EditField::Title, take());
+    // `:` を打っている間はカーソルをそちらに置く
+    let at = |field: EditField| e.cmd.is_none() && e.field == field;
+    draw_field(f, "名前 ", &e.title, at(EditField::Title), take());
 
-    // 軸の名前は長さが違うので、ラベルの幅を揃えてから並べる
-    let labels = [e.kind.axis(), "clau度"];
-    let w = labels.iter().map(|l| l.width()).max().unwrap_or(0);
-    f.render_widget(
-        Paragraph::new(vec![
-            choice(&pad(labels[0], w), "高", "低", e.axis_hi, e.field == EditField::Axis),
-            choice(&pad(labels[1], w), "高", "低", e.clau, e.field == EditField::Clau),
-        ]),
-        take(),
-    );
+    if !memo {
+        // 軸の名前は長さが違うので、ラベルの幅を揃えてから並べる
+        let labels = [e.kind.axis(), "clau度"];
+        let w = labels.iter().map(|l| l.width()).max().unwrap_or(0);
+        f.render_widget(
+            Paragraph::new(vec![
+                choice(&pad(labels[0], w), "高", "低", e.axis_hi, e.field == EditField::Axis),
+                choice(&pad(labels[1], w), "高", "低", e.clau, e.field == EditField::Clau),
+            ]),
+            take(),
+        );
+    }
 
     if has_due {
         let [line, hint] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(take());
-        draw_field(f, "日時 ", &e.due, e.field == EditField::Due, line);
+        draw_field(f, "日時 ", &e.due, at(EditField::Due), line);
         f.render_widget(Paragraph::new(format!("     {}", due::HINT).fg(DIM)), hint);
     }
     if let Some(err) = &e.error {
@@ -468,8 +533,46 @@ fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
             .collect()
     };
     f.render_widget(Paragraph::new(notes), take());
-    let h = "↑↓:欄  h/l:高低  Enter:保存  Tab:メモをエディタで編集  Esc:やめる";
-    f.render_widget(Paragraph::new(h.fg(DIM)), take());
+
+    let help = take();
+    if let Some(cmd) = &e.cmd {
+        return draw_field(f, ":", cmd, true, help);
+    }
+    let line = if e.inserting() {
+        Line::from(vec![
+            Span::styled("-- INSERT -- ", Style::new().fg(ACCENT).bold()),
+            "Esc/jj:ノーマル  ↑↓:欄  Enter:保存  Tab:メモ".fg(DIM),
+        ])
+    } else if e.typing() {
+        Line::from("i/a:挿入  j/k:欄  Enter/:w:保存  Esc/q:やめる  Tab:メモ".fg(DIM))
+    } else {
+        Line::from("h/l:高低  j/k:欄  Enter/:w:保存  Esc/q:やめる  Tab:メモ".fg(DIM))
+    };
+    f.render_widget(Paragraph::new(line), help);
+}
+
+fn help_area(area: Rect) -> Rect {
+    popup_area(area, 92, help_lines() as u16 + 2)
+}
+
+/// `?` のキー一覧
+fn draw_help(f: &mut Frame, scroll: u16, area: Rect) {
+    let r = help_area(area);
+    f.render_widget(Clear, r);
+    let key_w = HELP.iter().flat_map(|(_, keys)| keys.iter().map(|(k, _)| k.width())).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for (head, keys) in HELP {
+        lines.push(Line::from(Span::styled(head.to_string(), Style::new().fg(ACCENT).bold())));
+        for (k, desc) in keys.iter() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}  ", pad(k, key_w)), Style::new().bold()),
+                Span::raw(desc.to_string()),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    let block = popup_block("キー一覧  j/k:スクロール  q:閉じる");
+    f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), r);
 }
 
 /// ラベル付きの1行入力欄。カーソルのある欄にだけカーソルを置く

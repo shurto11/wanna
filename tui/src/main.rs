@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod config;
 mod editor;
+mod input;
 mod store;
 mod sync;
 mod ui;

@@ -1,8 +1,13 @@
+mod keys;
+
+pub use keys::{help_lines, Pending, HELP};
+
+use crate::input::TextInput;
 use crate::store::{Op, Store};
 use crate::sync::{FromSync, ToWorker};
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
+use std::ops::Range;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 use wanna_core::{due, notes, now_rfc3339, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
@@ -18,63 +23,11 @@ pub enum Screen {
     Memo,
 }
 
-/// 1行のテキスト入力
-#[derive(Default, Clone)]
-pub struct TextInput {
-    pub text: String,
-    /// 文字単位のカーソル位置
-    pub cursor: usize,
-}
+/// タブの数 (Want, Must, Done, Archive, Memo)
+const TABS: usize = 5;
 
-impl TextInput {
-    pub fn new(text: &str) -> Self {
-        Self { text: text.to_string(), cursor: text.chars().count() }
-    }
-
-    fn byte_at(&self, char_idx: usize) -> usize {
-        self.text.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(self.text.len())
-    }
-
-    pub fn before_cursor(&self) -> &str {
-        &self.text[..self.byte_at(self.cursor)]
-    }
-
-    pub fn insert(&mut self, c: char) {
-        let i = self.byte_at(self.cursor);
-        self.text.insert(i, c);
-        self.cursor += 1;
-    }
-
-    /// 編集キーなら処理して true
-    fn handle(&mut self, key: KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Char('a') if ctrl => self.cursor = 0,
-            KeyCode::Char('e') if ctrl => self.cursor = self.text.chars().count(),
-            KeyCode::Char('u') if ctrl => {
-                let i = self.byte_at(self.cursor);
-                self.text.drain(..i);
-                self.cursor = 0;
-            }
-            KeyCode::Char(c) if !ctrl => self.insert(c),
-            KeyCode::Backspace if self.cursor > 0 => {
-                self.cursor -= 1;
-                let i = self.byte_at(self.cursor);
-                self.text.remove(i);
-            }
-            KeyCode::Delete if self.cursor < self.text.chars().count() => {
-                let i = self.byte_at(self.cursor);
-                self.text.remove(i);
-            }
-            KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Right => self.cursor = (self.cursor + 1).min(self.text.chars().count()),
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.text.chars().count(),
-            _ => return false,
-        }
-        true
-    }
-}
+/// 取り消せる回数
+const UNDO_MAX: usize = 100;
 
 /// 外部エディタでのメモ編集の依頼。main ループが端末を明け渡して処理する
 pub struct EditorReq {
@@ -103,8 +56,14 @@ pub struct Edit {
     pub due: TextInput,
     pub notes: String,
     pub field: EditField,
-    /// 日時が読めなかったときの説明
+    /// 日時が読めなかったなどの説明
     pub error: Option<String>,
+    /// 入力欄に文字を打っている (vim の挿入モード)。false ならポップアップの中のノーマルモード
+    pub insert: bool,
+    /// ポップアップの中で打っている `:` コマンド
+    pub cmd: Option<TextInput>,
+    /// `ZZ` / `ZQ` の打ちかけ
+    zz: bool,
 }
 
 impl Edit {
@@ -119,29 +78,42 @@ impl Edit {
             notes: w.notes.clone(),
             field: EditField::Title,
             error: None,
+            insert: true,
+            cmd: None,
+            zz: false,
         }
     }
 
-    /// この1件で回れる欄。日時はリストによって出ない
+    /// この1件で回れる欄。日時はリストによって出ない。メモは名前だけ
     pub fn fields(&self) -> &'static [EditField] {
         use EditField::*;
-        if self.kind.has_due() {
-            &[Title, Axis, Clau, Due]
-        } else {
-            &[Title, Axis, Clau]
+        match self.kind {
+            Kind::Memo => &[Title],
+            k if k.has_due() => &[Title, Axis, Clau, Due],
+            _ => &[Title, Axis, Clau],
         }
     }
 
+    /// 欄を移る。移った先ではノーマルモード
     fn move_field(&mut self, down: bool) {
         let fields = self.fields();
         let i = fields.iter().position(|f| *f == self.field).unwrap_or(0);
         let next = if down { (i + 1).min(fields.len() - 1) } else { i.saturating_sub(1) };
         self.field = fields[next];
+        self.insert = false;
+        if let Some(input) = self.input_mut() {
+            input.clamp_normal();
+        }
     }
 
-    /// 文字キーを入力に回す欄か (高低を選ぶ欄では h/l などがキー操作になる)
-    fn typing(&self) -> bool {
+    /// 文字を打つ欄か (高低を選ぶ欄では h/l などがキー操作になる)
+    pub fn typing(&self) -> bool {
         matches!(self.field, EditField::Title | EditField::Due)
+    }
+
+    /// 今 vim の挿入モードか
+    pub fn inserting(&self) -> bool {
+        self.insert && self.typing()
     }
 
     fn input_mut(&mut self) -> Option<&mut TextInput> {
@@ -155,11 +127,24 @@ impl Edit {
 
 pub enum Mode {
     Normal,
-    Add(TextInput),
+    /// `o` / `O` で追加する名前の入力。`at` は区分の何番目に入れるか (メモでは使わない)
+    Add { input: TextInput, at: usize },
     Edit(Edit),
-    ConfirmDelete { id: String, title: String },
-    /// 名前だけを変える (メモ用)
-    Rename { id: String, input: TextInput },
+    /// ビジュアルモード。`anchor` 行目から今のカーソルまでを選ぶ
+    Visual { anchor: usize },
+    /// `/` で打っている検索語
+    Search(TextInput),
+    /// `:` で打っているコマンド
+    Command(TextInput),
+    /// `?` のキー一覧。数字はスクロール位置
+    Help(u16),
+}
+
+/// 取り消し1回ぶんの変更のうちの1件。変更前と変更後を持つ
+struct Change {
+    id: String,
+    before: Want,
+    after: Want,
 }
 
 pub struct App {
@@ -179,6 +164,19 @@ pub struct App {
     pub message: Option<String>,
     pub quit: bool,
     pub editor: Option<EditorReq>,
+    /// 打ちかけのカウントと前置キー
+    pub pending: Pending,
+    /// 最後に `/` で探した語。名前の中の一致を目立たせる
+    pub search: Option<String>,
+    /// カーソルのある一覧の見えている行数。描画のたびに更新し、半ページ移動に使う
+    pub view_rows: usize,
+
+    /// `dd` で消したもの。`p` で貼る
+    register: Vec<String>,
+    undo: Vec<Vec<Change>>,
+    redo: Vec<Vec<Change>>,
+    /// 今の操作で触ったものの変更前
+    recording: Option<Vec<(String, Want)>>,
 
     worker: Option<Sender<ToWorker>>,
     syncing: bool,
@@ -207,6 +205,13 @@ impl App {
             message: None,
             quit: false,
             editor: None,
+            pending: Pending::default(),
+            search: None,
+            view_rows: 10,
+            register: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            recording: None,
             worker,
             syncing: false,
             dirty: false,
@@ -308,6 +313,39 @@ impl App {
         }
     }
 
+    /// カーソルのある一覧 (リストの画面なら区分) の長さと選択行
+    fn view(&self) -> (usize, usize) {
+        match self.past() {
+            None => (self.cur_list().len(), self.sel()),
+            Some((list, sel)) => (list.len(), sel),
+        }
+    }
+
+    /// カーソルのある一覧の `i` 行目を選ぶ (範囲に収める)
+    fn view_select(&mut self, i: usize) {
+        let i = i.min(self.view().0.saturating_sub(1));
+        match self.screen {
+            Screen::List => self.select(i),
+            _ => self.past_list_mut().select(Some(i)),
+        }
+    }
+
+    /// カーソルのある一覧の `range` 行目の ID
+    fn view_ids(&self, range: Range<usize>) -> Vec<String> {
+        let list = match self.past() {
+            None => self.cur_list(),
+            Some((list, _)) => list,
+        };
+        list.iter().skip(range.start).take(range.len()).map(|w| w.id.clone()).collect()
+    }
+
+    /// ビジュアルモードで選んでいる行 (カーソルのある一覧の中)
+    pub fn visual_range(&self) -> Option<Range<usize>> {
+        let Mode::Visual { anchor } = self.mode else { return None };
+        let sel = self.view().1;
+        Some(anchor.min(sel)..anchor.max(sel) + 1)
+    }
+
     /// 選択位置をリストの範囲に収める
     fn clamp(&mut self) {
         for kind in Kind::ALL {
@@ -342,10 +380,69 @@ impl App {
         }
     }
 
+    /// `id` が今の画面に出ていればカーソルを合わせる。リストの画面ならリストも切り替える
+    fn reveal(&mut self, id: &str) {
+        match self.past().and_then(|(list, _)| list.iter().position(|w| w.id == id)) {
+            Some(i) => self.past_list_mut().select(Some(i)),
+            None if self.screen == Screen::List => self.focus(id),
+            None => {}
+        }
+    }
+
+    /// カーソルを下 (`down`) / 上へ `n` 行動かす。`cross` ならリストの区分の端で上下の区分へ抜ける
+    fn move_cursor(&mut self, down: bool, n: usize, cross: bool) {
+        for _ in 0..n {
+            let (len, sel) = self.view();
+            let top = self.cur < 2;
+            if down && sel + 1 < len {
+                self.view_select(sel + 1);
+            } else if !down && sel > 0 {
+                self.view_select(sel - 1);
+            } else if cross && self.screen == Screen::List && down && top {
+                self.cur += 2;
+                self.select(0);
+            } else if cross && self.screen == Screen::List && !down && !top {
+                self.cur -= 2;
+                let len = self.cur_list().len();
+                self.select(len.saturating_sub(1));
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// 今のタブの番号 (Want, Must, Done, Archive, Memo の順で 0 から)
+    fn tab(&self) -> usize {
+        match self.screen {
+            Screen::List => self.kind.index(),
+            Screen::Done => 2,
+            Screen::Archive => 3,
+            Screen::Memo => 4,
+        }
+    }
+
+    fn set_tab(&mut self, i: usize) {
+        match i {
+            0 | 1 => {
+                self.screen = Screen::List;
+                self.kind = Kind::ALL[i];
+            }
+            2 => self.screen = Screen::Done,
+            3 => self.screen = Screen::Archive,
+            _ => self.screen = Screen::Memo,
+        }
+    }
+
+    /// 表示を Want → Must → Done → Archive → Memo の順に回す
+    fn cycle_view(&mut self, forward: bool) {
+        self.set_tab((self.tab() + if forward { 1 } else { TABS - 1 }) % TABS);
+    }
+
     // ───────── 変更 ─────────
 
     /// ローカルに適用して outbox に積み、同期を促す
     fn commit(&mut self, op: Op) {
+        self.record(&op);
         match &op {
             Op::Create { want } => self.wants.push(want.clone()),
             Op::Patch { id, patch } => {
@@ -379,55 +476,427 @@ impl App {
         self.commit(Op::Patch { id: id.to_string(), patch });
     }
 
+    // ───────── 取り消し ─────────
+
+    /// キー1回 (エディタから戻った1回) を取り消しの単位にする
+    fn begin_change(&mut self) {
+        self.recording = Some(Vec::new());
+    }
+
+    fn end_change(&mut self) {
+        let Some(rec) = self.recording.take() else { return };
+        let changes: Vec<Change> = rec
+            .into_iter()
+            .filter_map(|(id, before)| {
+                let after = self.wants.iter().find(|w| w.id == id)?.clone();
+                (after != before).then_some(Change { id, before, after })
+            })
+            .collect();
+        if !changes.is_empty() {
+            self.undo.push(changes);
+            if self.undo.len() > UNDO_MAX {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+    }
+
+    /// 今の操作で初めて触るものなら、変更前を覚えておく
+    fn record(&mut self, op: &Op) {
+        let Some(rec) = &mut self.recording else { return };
+        if rec.iter().any(|(id, _)| id == op.id()) {
+            return;
+        }
+        let before = match op {
+            // 作る前は「消してある」ものとして扱う
+            Op::Create { want } => Want { deleted: true, ..want.clone() },
+            _ => match self.wants.iter().find(|w| w.id == op.id()) {
+                Some(w) => w.clone(),
+                None => return,
+            },
+        };
+        rec.push((op.id().to_string(), before));
+    }
+
+    /// 取り消す (`redo` ならやり直す)
+    fn undo(&mut self, redo: bool) {
+        // 取り消し自体は取り消しの履歴に積まない
+        self.recording = None;
+        let Some(changes) = (if redo { self.redo.pop() } else { self.undo.pop() }) else {
+            self.message =
+                Some(if redo { "これ以上やり直せません" } else { "これ以上取り消せません" }.into());
+            return;
+        };
+        for c in &changes {
+            let (to, from) = if redo { (&c.after, &c.before) } else { (&c.before, &c.after) };
+            self.revert(&c.id, to, from);
+        }
+        let what = if redo { "やり直しました" } else { "取り消しました" };
+        self.message = Some(match changes.as_slice() {
+            [c] => format!("{what}: {}", c.after.title),
+            cs => format!("{} 件を{what}", cs.len()),
+        });
+        self.reveal(&changes[0].id);
+        if redo {
+            self.undo.push(changes);
+        } else {
+            self.redo.push(changes);
+        }
+    }
+
+    /// `id` を `to` の状態にする。`from` と違う欄 (その操作で変わった欄) だけを書き戻す
+    fn revert(&mut self, id: &str, to: &Want, from: &Want) {
+        let Some(cur) = self.wants.iter().find(|w| w.id == id) else { return };
+        fn pick<T: PartialEq + Clone>(to: &T, from: &T, cur: &T) -> Option<T> {
+            (to != from && to != cur).then(|| to.clone())
+        }
+        let mut p = WantPatch {
+            title: pick(&to.title, &from.title, &cur.title),
+            notes: pick(&to.notes, &from.notes, &cur.notes),
+            kind: pick(&to.kind, &from.kind, &cur.kind),
+            axis_hi: pick(&to.axis_hi, &from.axis_hi, &cur.axis_hi),
+            clau: pick(&to.clau, &from.clau, &cur.clau),
+            pos: pick(&to.pos, &from.pos, &cur.pos),
+            due_at: pick(&to.due_at, &from.due_at, &cur.due_at),
+            done_at: pick(&to.done_at, &from.done_at, &cur.done_at),
+            archived_at: pick(&to.archived_at, &from.archived_at, &cur.archived_at),
+            deleted: pick(&to.deleted, &from.deleted, &cur.deleted),
+            ..Default::default()
+        };
+        // リストに戻す・区分を移すときに pos が無いと、サーバーが区分の末尾に付け直してしまう
+        let moved = !cur.is_active() || p.kind.is_some() || p.axis_hi.is_some() || p.clau.is_some();
+        if to.kind.is_list() && to.is_active() && moved && p.pos.is_none() {
+            p.pos = Some(to.pos.clone());
+        }
+        if p.pos.as_deref() == Some("") {
+            p.pos = None;
+        }
+        if p == WantPatch::default() {
+            return;
+        }
+        // 消すだけなら削除として送る
+        if p == (WantPatch { deleted: Some(true), ..Default::default() }) {
+            self.commit(Op::Delete { id: id.to_string() });
+        } else {
+            self.patch(id, p);
+        }
+    }
+
+    // ───────── 並び・移動 ─────────
+
     /// リスト・区分の末尾に付ける pos
     fn tail_pos(&self, kind: Kind, q: Quadrant) -> String {
         let list = self.list(kind, q);
         pos::between(list.last().map(|w| w.pos.as_str()), None)
     }
 
-    /// 区分内で `id` を `to` 番目に置く。pos が重複していて挟めなければ区分全体を振り直す
-    fn place(&mut self, id: &str, to: usize) {
-        let (kind, q) = (self.kind, self.cur_q());
+    /// 区分の `to` 番目に新しく入れる pos。前後の pos が重複していて挟めなければ None
+    fn pos_at(&self, kind: Kind, q: Quadrant, to: usize) -> Option<String> {
+        let list = self.list(kind, q);
+        let to = to.min(list.len());
+        let a = to.checked_sub(1).map(|i| list[i].pos.as_str());
+        let b = list.get(to).map(|w| w.pos.as_str());
+        a.zip(b).is_none_or(|(a, b)| a < b).then(|| pos::between(a, b))
+    }
+
+    /// `ids` をこの順で `kind` の区分 `q` の `to` 番目 (`ids` 自身を除いて数える) に置く。
+    /// リストや区分が違えば移し、消した・やった・しまったものはリストに戻す。
+    /// pos が重複していて挟めなければ区分全体を振り直す
+    fn put(&mut self, ids: &[String], kind: Kind, q: Quadrant, to: usize) {
         let others: Vec<(String, String)> = self
             .list(kind, q)
             .into_iter()
-            .filter(|w| w.id != id)
+            .filter(|w| !ids.contains(&w.id))
             .map(|w| (w.id.clone(), w.pos.clone()))
             .collect();
         let to = to.min(others.len());
-        let a = to.checked_sub(1).map(|i| others[i].1.as_str());
-        let b = others.get(to).map(|o| o.1.as_str());
-        if a.zip(b).is_none_or(|(a, b)| a < b) {
-            let p = pos::between(a, b);
-            self.patch(id, WantPatch { pos: Some(p), ..Default::default() });
+        let a = to.checked_sub(1).map(|i| others[i].1.clone());
+        let b = others.get(to).map(|o| o.1.clone());
+        let (a, b) = (a.as_deref(), b.as_deref());
+        let keys: Vec<(String, String)> = if a.zip(b).is_none_or(|(a, b)| a < b) {
+            let keys = match ids.len() {
+                // 末尾への追加はキーが伸びにくい方法で作る
+                1 => vec![pos::between(a, b)],
+                n => pos::n_between(a, b, n),
+            };
+            ids.iter().cloned().zip(keys).collect()
         } else {
             let mut order: Vec<String> = others.into_iter().map(|o| o.0).collect();
-            order.insert(to, id.to_string());
+            order.splice(to..to, ids.iter().cloned());
             let keys = pos::n_between(None, None, order.len());
-            for (id, p) in order.iter().zip(keys) {
-                self.patch(id, WantPatch { pos: Some(p), ..Default::default() });
+            order.into_iter().zip(keys).collect()
+        };
+        for (id, p) in keys {
+            let Some(w) = self.wants.iter().find(|w| w.id == id) else { continue };
+            let mut patch = WantPatch::default();
+            if ids.contains(&id) {
+                patch.kind = (w.kind != kind).then_some(kind);
+                patch.axis_hi = (w.axis_hi != q.axis_hi).then_some(q.axis_hi);
+                patch.clau = (w.clau != q.clau).then_some(q.clau);
+                patch.deleted = w.deleted.then_some(false);
+                patch.done_at = w.done_at.is_some().then_some(None);
+                patch.archived_at = w.archived_at.is_some().then_some(None);
+                // やりたいことは日時を持たない
+                patch.due_at = (!kind.has_due() && w.due_at.is_some()).then_some(None);
+            }
+            // 移すときは pos を必ず送る (送らないとサーバーが末尾に付け直す)
+            if w.pos != p || patch != WantPatch::default() {
+                patch.pos = Some(p);
+                self.patch(&id, patch);
             }
         }
-        self.focus(id);
+        if let Some(id) = ids.first() {
+            self.focus(id);
+        }
     }
 
-    /// 選択中のものをもう一方のリストへ移す。行き先の同じ区分の末尾に入る
-    fn move_to_other_list(&mut self) {
-        let Some(w) = self.selected() else { return };
-        let (id, title, q, to) = (w.id.clone(), w.title.clone(), w.quadrant(), w.kind.other());
-        let pos = self.tail_pos(to, q);
-        self.patch(
-            &id,
-            WantPatch {
-                kind: Some(to),
-                pos: Some(pos),
-                // やりたいことは日時を持たない
-                due_at: (!to.has_due()).then_some(None),
+    /// 区分内で `id` を `to` 番目 (自分を除いて数える) に置く
+    fn place(&mut self, id: &str, to: usize) {
+        self.put(&[id.to_string()], self.kind, self.cur_q(), to);
+    }
+
+    /// 選んでいるものを区分の中で `n` 行下 (`down`) / 上へ。区分の端にいれば上下の区分へ移す
+    fn shift_vertical(&mut self, down: bool, n: usize) {
+        let Some(id) = self.selected().map(|w| w.id.clone()) else { return };
+        let (len, sel) = self.view();
+        let top = self.cur < 2;
+        if down && sel + 1 < len {
+            self.place(&id, (sel + n).min(len - 1));
+        } else if !down && sel > 0 {
+            self.place(&id, sel.saturating_sub(n));
+        } else if down && top {
+            self.put(&[id], self.kind, Quadrant::ALL[self.cur + 2], 0);
+        } else if !down && !top {
+            let q = Quadrant::ALL[self.cur - 2];
+            let len = self.list(self.kind, q).len();
+            self.put(&[id], self.kind, q, len);
+        }
+    }
+
+    /// 選んでいるもの (`ids`) を左右の区分へ移す。同じ行の高さに入る
+    fn shift_horizontal(&mut self, ids: &[String], right: bool) {
+        let target = if right { self.cur | 1 } else { self.cur & !1 };
+        if target == self.cur || ids.is_empty() {
+            return;
+        }
+        let at = self.view_ids(0..usize::MAX).iter().position(|id| *id == ids[0]).unwrap_or(0);
+        self.put(ids, self.kind, Quadrant::ALL[target], at);
+    }
+
+    /// もう一方のリストへ移す。行き先の同じ区分の末尾に入る
+    fn move_to_other_list(&mut self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let (kind, q) = (self.kind, self.cur_q());
+        let to = kind.other();
+        let len = self.list(to, q).len();
+        self.put(ids, to, q, len);
+        self.message = Some(match ids {
+            [id] => format!("{}へ移しました: {}", to.label(), self.title(id)),
+            _ => format!("{} 件を{}へ移しました", ids.len(), to.label()),
+        });
+    }
+
+    fn title(&self, id: &str) -> String {
+        self.wants.iter().find(|w| w.id == id).map(|w| w.title.clone()).unwrap_or_default()
+    }
+
+    /// やった (しまってあったものも、やったことにする)
+    fn mark_done(&mut self, ids: &[String]) {
+        let now = now_rfc3339();
+        for id in ids {
+            let archived = self.wants.iter().any(|w| &w.id == id && w.archived_at.is_some());
+            let patch = WantPatch {
+                done_at: Some(Some(now.clone())),
+                archived_at: archived.then_some(None),
                 ..Default::default()
-            },
-        );
+            };
+            self.patch(id, patch);
+        }
+        self.message = match ids {
+            [] => None,
+            [id] => Some(format!("やった！ {}", self.title(id))),
+            _ => Some(format!("やった！ {} 件", ids.len())),
+        };
+    }
+
+    fn archive(&mut self, ids: &[String]) {
+        let now = now_rfc3339();
+        for id in ids {
+            self.patch(id, WantPatch { archived_at: Some(Some(now.clone())), ..Default::default() });
+        }
+        self.message = match ids {
+            [] => None,
+            [id] => Some(format!("保管庫にしまいました: {}", self.title(id))),
+            _ => Some(format!("{} 件を保管庫にしまいました", ids.len())),
+        };
+    }
+
+    /// やった / しまったものを元のリストに戻す。元の区分の末尾に入る
+    fn restore(&mut self, ids: &[String]) {
+        for id in ids {
+            let Some(w) = self.wants.iter().find(|w| &w.id == id) else { continue };
+            let (kind, q) = (w.kind, w.quadrant());
+            let len = self.list(kind, q).len();
+            self.put(std::slice::from_ref(id), kind, q, len);
+        }
+        self.message = match ids {
+            [] => None,
+            [id] => {
+                let kind = self.wants.iter().find(|w| &w.id == id).map(|w| w.kind.label());
+                Some(format!("{}に戻しました: {}", kind.unwrap_or(""), self.title(id)))
+            }
+            _ => Some(format!("{} 件をリストに戻しました", ids.len())),
+        };
+    }
+
+    /// 消して、`p` で貼れるようにしておく
+    fn delete(&mut self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in &ids {
+            self.commit(Op::Delete { id: id.clone() });
+        }
+        self.message = Some(match ids.as_slice() {
+            [id] => format!("削除しました: {}  (u で戻す)", self.title(id)),
+            _ => format!("{} 件を削除しました  (u で戻す)", ids.len()),
+        });
+        self.register = ids;
+    }
+
+    /// `dd` で消したものをカーソルの下 (`above` なら上) に貼る
+    fn paste(&mut self, above: bool) {
+        let ids = self.register.clone();
+        if ids.is_empty() {
+            self.message = Some("貼るものがありません (dd で消したものを貼れます)".into());
+            return;
+        }
+        let memo = self.screen == Screen::Memo;
+        let fits = |id: &String| self.wants.iter().any(|w| &w.id == id && (w.kind == Kind::Memo) == memo);
+        if !ids.iter().all(fits) {
+            self.message =
+                Some(if memo { "Memo には Memo しか貼れません" } else { "Memo はリストに貼れません" }.into());
+            return;
+        }
+        // メモは作った日の順に並ぶので、戻すだけ
+        if memo {
+            for id in &ids {
+                if self.wants.iter().any(|w| &w.id == id && w.deleted) {
+                    self.patch(id, WantPatch { deleted: Some(false), ..Default::default() });
+                }
+            }
+            self.reveal(&ids[0]);
+            return;
+        }
+        // カーソルの行を基準に、貼るもの自身を除いて数えた位置
+        let to = match self.selected().filter(|w| !ids.contains(&w.id)) {
+            Some(cur) => {
+                let list = self.cur_list();
+                let i = list
+                    .iter()
+                    .filter(|w| !ids.contains(&w.id))
+                    .position(|w| w.id == cur.id)
+                    .unwrap_or(0);
+                if above {
+                    i
+                } else {
+                    i + 1
+                }
+            }
+            None => self.sel(),
+        };
+        self.put(&ids, self.kind, self.cur_q(), to);
+    }
+
+    /// `o` / `O` の入力から1件作る
+    fn add(&mut self, title: &str, at: usize) {
+        if self.screen == Screen::Memo {
+            // メモは作ったらそのまま本文をエディタで開く
+            let w = Want::new(title, Kind::Memo, false, false, String::new());
+            let id = w.id.clone();
+            self.commit(Op::Create { want: w });
+            if let Some(i) = self.memos().iter().position(|w| w.id == id) {
+                self.memo_list.select(Some(i));
+            }
+            self.editor = Some(EditorReq { id, text: String::new(), from_popup: false });
+            return;
+        }
+        let (kind, q) = (self.kind, self.cur_q());
+        let pos = self.pos_at(kind, q, at);
+        let w = Want::new(title, kind, q.axis_hi, q.clau, pos.clone().unwrap_or_else(|| self.tail_pos(kind, q)));
+        let id = w.id.clone();
+        self.commit(Op::Create { want: w });
+        if pos.is_none() {
+            self.place(&id, at);
+        }
         self.focus(&id);
-        self.message = Some(format!("{}へ移しました: {title}", to.label()));
+    }
+
+    // ───────── 検索 ─────────
+
+    /// 検索語に合う次 (`forward`) / 前のものへ `n` 回。端まで来たら反対の端から続ける
+    fn search_next(&mut self, forward: bool, n: usize) {
+        let Some(query) = self.search.clone() else {
+            self.message = Some("検索語がありません (/ で探せます)".into());
+            return;
+        };
+        // 今の画面に並んでいる順の (区分, 行, 一致するか)
+        let mut items: Vec<(usize, usize, bool)> = Vec::new();
+        match self.past() {
+            None => {
+                for (qi, q) in Quadrant::ALL.iter().enumerate() {
+                    for (i, w) in self.list(self.kind, *q).iter().enumerate() {
+                        items.push((qi, i, !matches(&w.title, &query).is_empty()));
+                    }
+                }
+            }
+            Some((list, _)) => {
+                for (i, w) in list.iter().enumerate() {
+                    items.push((0, i, !matches(&w.title, &query).is_empty()));
+                }
+            }
+        }
+        let cur = match self.screen {
+            Screen::List => (self.cur, self.sel()),
+            _ => (0, self.view().1),
+        };
+        let len = items.len();
+        // カーソルの行、無ければ (空の区分なら) その次の行
+        let mut start = items.iter().position(|&(q, i, _)| (q, i) >= cur).unwrap_or(len);
+        let mut on = start < len && (items[start].0, items[start].1) == cur;
+        let mut wrapped = false;
+        let mut found = None;
+        for _ in 0..n {
+            let hit = if forward {
+                let s = if on { start + 1 } else { start };
+                let k = (s..len).chain(0..s.min(len)).find(|&k| items[k].2);
+                wrapped |= k.is_some_and(|k| k < s);
+                k
+            } else {
+                let s = start;
+                let k = (0..s).rev().chain((s..len).rev()).find(|&k| items[k].2);
+                wrapped |= k.is_some_and(|k| k >= s);
+                k
+            };
+            let Some(k) = hit else { break };
+            (start, on, found) = (k, true, Some(k));
+        }
+        let Some(k) = found else {
+            self.message = Some(format!("見つかりません: {query}"));
+            return;
+        };
+        let (qi, i, _) = items[k];
+        if self.screen == Screen::List {
+            self.cur = qi;
+        }
+        self.view_select(i);
+        self.message = Some(match (wrapped, forward) {
+            (false, _) => format!("/{query}"),
+            (true, true) => "末尾まで探したので先頭から探しました".into(),
+            (true, false) => "先頭まで探したので末尾から探しました".into(),
+        });
     }
 
     // ───────── 同期 ─────────
@@ -520,144 +989,16 @@ impl App {
         Ok(())
     }
 
-    // ───────── キー入力 ─────────
-
-    pub fn on_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
-            return;
-        }
-        let mode = std::mem::replace(&mut self.mode, Mode::Normal);
-        self.mode = match mode {
-            Mode::Normal => {
-                self.message = None;
-                match self.screen {
-                    Screen::List => self.key_list(key),
-                    Screen::Done | Screen::Archive => self.key_past(key),
-                    Screen::Memo => self.key_memo(key),
-                }
-                return;
-            }
-            Mode::Add(mut input) => match key.code {
-                KeyCode::Esc => Mode::Normal,
-                // メモは作ったらそのまま本文をエディタで開く
-                KeyCode::Enter if !input.text.trim().is_empty() && self.screen == Screen::Memo => {
-                    let w = Want::new(input.text.trim(), Kind::Memo, false, false, String::new());
-                    let id = w.id.clone();
-                    self.commit(Op::Create { want: w });
-                    if let Some(i) = self.memos().iter().position(|w| w.id == id) {
-                        self.memo_list.select(Some(i));
-                    }
-                    self.editor = Some(EditorReq { id, text: String::new(), from_popup: false });
-                    Mode::Normal
-                }
-                KeyCode::Enter if !input.text.trim().is_empty() => {
-                    let (kind, q) = (self.kind, self.cur_q());
-                    let pos = self.tail_pos(kind, q);
-                    let w = Want::new(input.text.trim(), kind, q.axis_hi, q.clau, pos);
-                    let id = w.id.clone();
-                    self.commit(Op::Create { want: w });
-                    self.focus(&id);
-                    Mode::Normal
-                }
-                _ => {
-                    input.handle(key);
-                    Mode::Add(input)
-                }
-            },
-            Mode::Edit(mut e) => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let save = key.code == KeyCode::Enter || (ctrl && key.code == KeyCode::Char('s'));
-                // 高低を選ぶ欄では文字キーをキー操作として使う
-                let choosing = !e.typing();
-                let arrow = matches!(key.code, KeyCode::Up | KeyCode::Down);
-                if save {
-                    self.mode = match self.save_edit(&e) {
-                        Ok(()) => Mode::Normal,
-                        Err(msg) => {
-                            e.error = Some(msg);
-                            e.field = EditField::Due;
-                            Mode::Edit(e)
-                        }
-                    };
-                    return;
-                }
-                match key.code {
-                    KeyCode::Esc => Mode::Normal,
-                    KeyCode::Tab => {
-                        self.editor = Some(EditorReq {
-                            id: e.id.clone(),
-                            text: draft(&e.notes),
-                            from_popup: true,
-                        });
-                        Mode::Edit(e)
-                    }
-
-                    // 欄の移動
-                    KeyCode::Down | KeyCode::Char('j') if choosing || arrow => {
-                        e.move_field(true);
-                        Mode::Edit(e)
-                    }
-                    KeyCode::Up | KeyCode::Char('k') if choosing || arrow => {
-                        e.move_field(false);
-                        Mode::Edit(e)
-                    }
-
-                    // 高低の切り替え (左が高。空白は反転)
-                    KeyCode::Char('h' | 'l' | ' ') | KeyCode::Left | KeyCode::Right
-                        if choosing =>
-                    {
-                        let v = match key.code {
-                            KeyCode::Char(' ') => None,
-                            KeyCode::Char('h') | KeyCode::Left => Some(true),
-                            _ => Some(false),
-                        };
-                        match e.field {
-                            EditField::Clau => e.clau = v.unwrap_or(!e.clau),
-                            _ => e.axis_hi = v.unwrap_or(!e.axis_hi),
-                        }
-                        Mode::Edit(e)
-                    }
-
-                    _ => {
-                        if let Some(input) = e.input_mut() {
-                            if input.handle(key) {
-                                e.error = None;
-                            }
-                        }
-                        Mode::Edit(e)
-                    }
-                }
-            }
-            Mode::ConfirmDelete { id, title } => match key.code {
-                KeyCode::Char('y' | 'Y') => {
-                    self.commit(Op::Delete { id });
-                    self.message = Some(format!("削除しました: {title}"));
-                    Mode::Normal
-                }
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => Mode::Normal,
-                _ => Mode::ConfirmDelete { id, title },
-            },
-            Mode::Rename { id, mut input } => match key.code {
-                KeyCode::Esc => Mode::Normal,
-                KeyCode::Enter => {
-                    let title = input.text.trim();
-                    let changed = self.wants.iter().any(|w| w.id == id && w.title != title);
-                    if !title.is_empty() && changed {
-                        self.patch(&id, WantPatch { title: Some(title.to_string()), ..Default::default() });
-                    }
-                    Mode::Normal
-                }
-                _ => {
-                    input.handle(key);
-                    Mode::Rename { id, input }
-                }
-            },
-        };
-    }
+    // ───────── 編集 ─────────
 
     /// 外部エディタから戻ったとき
     pub fn on_editor(&mut self, req: EditorReq, res: Result<String>) {
+        self.begin_change();
+        self.apply_editor(req, res);
+        self.end_change();
+    }
+
+    fn apply_editor(&mut self, req: EditorReq, res: Result<String>) {
         let memo = self.wants.iter().any(|w| w.id == req.id && w.kind == Kind::Memo);
         let text = match res {
             // テンプレートのまま閉じたら何も書かなかったことにする (メモにはテンプレートが無い)
@@ -684,8 +1025,7 @@ impl App {
     /// 選択中のもののメモを外部エディタで開く
     fn edit_notes(&mut self) {
         if let Some(w) = self.selected() {
-            let text = if w.kind == Kind::Memo { w.notes.clone() } else { draft(&w.notes) };
-            self.editor = Some(EditorReq { id: w.id.clone(), text, from_popup: false });
+            self.editor = Some(EditorReq { id: w.id.clone(), text: editor_text(w.kind, &w.notes), from_popup: false });
         }
     }
 
@@ -762,209 +1102,50 @@ impl App {
         }
         self.mode = Mode::Edit(e);
     }
-
-    /// 表示を Want → Must → Done → Archive → Memo の順に回す
-    fn cycle_view(&mut self, forward: bool) {
-        let cur = match self.screen {
-            Screen::List => self.kind.index(),
-            Screen::Done => 2,
-            Screen::Archive => 3,
-            Screen::Memo => 4,
-        };
-        match (cur + if forward { 1 } else { 4 }) % 5 {
-            0 => {
-                self.screen = Screen::List;
-                self.kind = Kind::Want;
-            }
-            1 => {
-                self.screen = Screen::List;
-                self.kind = Kind::Task;
-            }
-            2 => self.screen = Screen::Done,
-            3 => self.screen = Screen::Archive,
-            _ => self.screen = Screen::Memo,
-        }
-    }
-
-    fn key_list(&mut self, key: KeyEvent) {
-        let len = self.cur_list().len();
-        let sel = self.sel();
-        let top = self.cur < 2;
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            // 画面の切り替え
-            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
-            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
-            KeyCode::Char('n') => self.mode = Mode::Add(TextInput::default()),
-            KeyCode::Char('r') => {
-                self.message = Some("同期中…".into());
-                self.request_sync();
-            }
-
-            // カーソル移動。j/k は区分内、端まで来たら上下の区分へ抜ける
-            KeyCode::Char('j') | KeyCode::Down => {
-                if sel + 1 < len {
-                    self.select(sel + 1);
-                } else if top {
-                    self.cur += 2;
-                    self.select(0);
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if sel > 0 {
-                    self.select(sel - 1);
-                } else if !top {
-                    self.cur -= 2;
-                    let len = self.cur_list().len();
-                    self.select(len.saturating_sub(1));
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => self.cur &= !1,
-            KeyCode::Char('l') | KeyCode::Right => self.cur |= 1,
-            KeyCode::Char('g') | KeyCode::Home => self.select(0),
-            KeyCode::Char('G') | KeyCode::End => self.select(len.saturating_sub(1)),
-            KeyCode::Char(c @ '0'..='9') => {
-                let i = if c == '0' { 9 } else { c as usize - '1' as usize };
-                if i < len {
-                    self.select(i);
-                }
-            }
-
-            // 並べ替え
-            KeyCode::Char('K') if sel > 0 => {
-                if let Some(id) = self.selected().map(|w| w.id.clone()) {
-                    self.place(&id, sel - 1);
-                }
-            }
-            KeyCode::Char('J') if sel + 1 < len => {
-                if let Some(id) = self.selected().map(|w| w.id.clone()) {
-                    self.place(&id, sel + 1);
-                }
-            }
-            KeyCode::Char('X') => self.move_to_other_list(),
-
-            KeyCode::Char('e') | KeyCode::Enter => self.open_edit(EditField::Title),
-            KeyCode::Char('s') => self.open_edit(EditField::Due),
-            KeyCode::Char('m') => self.edit_notes(),
-            KeyCode::Char('t') => {
-                if let Some(w) = self.selected() {
-                    let (id, title) = (w.id.clone(), w.title.clone());
-                    self.patch(&id, WantPatch { done_at: Some(Some(now_rfc3339())), ..Default::default() });
-                    self.message = Some(format!("やった！ {title}"));
-                }
-            }
-            KeyCode::Char('a') => {
-                if let Some(w) = self.selected() {
-                    let (id, title) = (w.id.clone(), w.title.clone());
-                    self.patch(&id, WantPatch { archived_at: Some(Some(now_rfc3339())), ..Default::default() });
-                    self.message = Some(format!("保管庫にしまいました: {title}"));
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(w) = self.selected() {
-                    self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// やったこと / 保管庫 の画面
-    fn key_past(&mut self, key: KeyEvent) {
-        let Some((list, sel)) = self.past() else { return };
-        let len = list.len();
-        let done = self.screen == Screen::Done;
-        match key.code {
-            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
-            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
-            // 直前に見ていたリストへ戻る
-            KeyCode::Esc => self.screen = Screen::List,
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('j') | KeyCode::Down if sel + 1 < len => {
-                self.past_list_mut().select(Some(sel + 1))
-            }
-            KeyCode::Char('k') | KeyCode::Up if sel > 0 => self.past_list_mut().select(Some(sel - 1)),
-            KeyCode::Char('g') | KeyCode::Home => self.past_list_mut().select(Some(0)),
-            KeyCode::Char('G') | KeyCode::End => {
-                self.past_list_mut().select(Some(len.saturating_sub(1)))
-            }
-            // リストに戻す
-            KeyCode::Char('u') => {
-                if let Some(w) = self.selected() {
-                    let (id, title, kind, q) =
-                        (w.id.clone(), w.title.clone(), w.kind, w.quadrant());
-                    let patch = WantPatch {
-                        done_at: Some(None),
-                        archived_at: Some(None),
-                        pos: Some(self.tail_pos(kind, q)),
-                        ..Default::default()
-                    };
-                    self.patch(&id, patch);
-                    self.message = Some(format!("{}に戻しました: {title}", kind.label()));
-                }
-            }
-            // しまっていたものを結局やった
-            KeyCode::Char('t') if !done => {
-                if let Some(w) = self.selected() {
-                    let (id, title) = (w.id.clone(), w.title.clone());
-                    let patch = WantPatch {
-                        done_at: Some(Some(now_rfc3339())),
-                        archived_at: Some(None),
-                        ..Default::default()
-                    };
-                    self.patch(&id, patch);
-                    self.message = Some(format!("やった！ {title}"));
-                }
-            }
-            KeyCode::Char('m') => self.edit_notes(),
-            KeyCode::Char('d') => {
-                if let Some(w) = self.selected() {
-                    self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// メモの画面
-    fn key_memo(&mut self, key: KeyEvent) {
-        let Some((list, sel)) = self.past() else { return };
-        let len = list.len();
-        match key.code {
-            KeyCode::Char(']') | KeyCode::Tab => self.cycle_view(true),
-            KeyCode::Char('[') | KeyCode::BackTab => self.cycle_view(false),
-            KeyCode::Esc => self.screen = Screen::List,
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('r') => {
-                self.message = Some("同期中…".into());
-                self.request_sync();
-            }
-            KeyCode::Char('j') | KeyCode::Down if sel + 1 < len => self.memo_list.select(Some(sel + 1)),
-            KeyCode::Char('k') | KeyCode::Up if sel > 0 => self.memo_list.select(Some(sel - 1)),
-            KeyCode::Char('g') | KeyCode::Home => self.memo_list.select(Some(0)),
-            KeyCode::Char('G') | KeyCode::End => self.memo_list.select(Some(len.saturating_sub(1))),
-            KeyCode::Char('n') => self.mode = Mode::Add(TextInput::default()),
-            KeyCode::Char('m') | KeyCode::Enter => self.edit_notes(),
-            KeyCode::Char('e') => {
-                if let Some(w) = self.selected() {
-                    self.mode = Mode::Rename { id: w.id.clone(), input: TextInput::new(&w.title) };
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(w) = self.selected() {
-                    self.mode = Mode::ConfirmDelete { id: w.id.clone(), title: w.title.clone() };
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
-/// エディタで開く中身。空ならテンプレートを入れておく
-fn draft(notes: &str) -> String {
-    if notes.is_empty() {
+/// `query` が `text` に現れる範囲 (バイト位置)。
+/// ~/.vimrc の `ignorecase` `smartcase` と同じく、大文字を含まなければ大文字小文字を区別しない
+pub fn matches(text: &str, query: &str) -> Vec<Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let fold = !query.chars().any(char::is_uppercase);
+    let norm = |c: char| if fold { c.to_lowercase().next().unwrap_or(c) } else { c };
+    let q: Vec<char> = query.chars().map(norm).collect();
+    let t: Vec<(usize, char)> = text.char_indices().map(|(i, c)| (i, norm(c))).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + q.len() <= t.len() {
+        if t[i..i + q.len()].iter().map(|x| x.1).eq(q.iter().copied()) {
+            let end = t.get(i + q.len()).map(|x| x.0).unwrap_or(text.len());
+            out.push(t[i].0..end);
+            i += q.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// エディタで開く中身。リストのものでメモが空ならテンプレートを入れておく (メモには入れない)
+fn editor_text(kind: Kind, notes: &str) -> String {
+    if notes.is_empty() && kind != Kind::Memo {
         notes::template()
     } else {
         notes.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smartcase() {
+        assert_eq!(matches("Buy milk", "buy"), vec![0..3]);
+        assert!(matches("Buy milk", "bUy").is_empty());
+        assert_eq!(matches("牛乳と牛肉", "牛"), vec![0..3, 9..12]);
+        assert!(matches("abc", "").is_empty());
     }
 }
