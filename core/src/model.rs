@@ -192,6 +192,9 @@ impl Want {
         if let Some(v) = &p.archived_at {
             self.archived_at = v.clone();
         }
+        if let Some(v) = p.deleted {
+            self.deleted = v;
+        }
     }
 }
 
@@ -258,6 +261,9 @@ pub struct WantPatch {
         deserialize_with = "double_option"
     )]
     pub archived_at: Option<Option<String>>,
+    /// `Some(false)` で消したものを戻す (取り消しと貼り付け用)。`Some(true)` は削除と同じ
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
     /// 書き込み時点の rev がこれでなければサーバーは 409 を返す (読んで書き戻す人向け)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_rev: Option<i64>,
@@ -328,6 +334,17 @@ mod tests {
         assert!(w.is_active());
         let p: WantPatch = serde_json::from_str(r#"{"archived_at": null}"#).unwrap();
         assert_eq!(p.archived_at, Some(None));
+    }
+
+    #[test]
+    fn undelete() {
+        let mut w = Want::new("a", Kind::Want, true, false, "V".into());
+        w.deleted = true;
+        w.apply(&WantPatch { deleted: Some(false), ..Default::default() });
+        assert!(w.is_active());
+        let p: WantPatch = serde_json::from_str(r#"{"deleted": false}"#).unwrap();
+        assert_eq!(p.deleted, Some(false));
+        assert_eq!(serde_json::to_string(&WantPatch::default()).unwrap(), "{}");
     }
 
     #[test]

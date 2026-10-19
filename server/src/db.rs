@@ -327,6 +327,12 @@ mod tests {
         let a = upsert(&mut c, new("a", Kind::Want, true, false)).unwrap();
         assert!(a.deleted);
         assert!(patch(&mut c, "zzz", &p).unwrap().is_none());
+
+        // 戻すときは明示する。pos を送ればその位置に戻る
+        let p = WantPatch { deleted: Some(false), pos: Some("A".into()), ..Default::default() };
+        let a = patch(&mut c, "a", &p).unwrap().unwrap();
+        assert!(!a.deleted);
+        assert_eq!(a.pos, "A");
     }
 
     #[test]
