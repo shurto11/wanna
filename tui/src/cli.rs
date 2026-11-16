@@ -19,7 +19,8 @@ const USAGE: &str = "\
                                          一覧 (既定は両方のやってない・しまってないもの。メモは --memo)
   show [ID] [--json]                     1件とメモを出す (ID 省略で @)
   new <タイトル> [--want] [--lo] [--no-clau] [--due <日時>] [--link]
-                                         テンプレート入りで作る (既定は Must・重要度高・clau高。
+                                         テンプレート入りで作る (既定は Must・学校・clau高。
+                                         --lo は Want ならエネルギー低、Must ならその他。
                                          日時は Must のみ。書き方は TUI の日時欄と同じ)
   log [-c] <ID> <テキスト...>            進捗ログに日付付きで1行足す (-c で [c] を付ける)
   note <ID> <見出し> [テキスト...|-]     見出しの本文を置き換える (- で標準入力。省略で表示)
@@ -284,10 +285,11 @@ fn ls(c: &Client, want: bool, must: bool, shelf: Shelf, json: bool) -> Result<()
             _ => true,
         })
         .collect();
-    // リスト → 区分 (画面の並び) → 区分内の並び
-    let q_index = |w: &Want| Quadrant::ALL.iter().position(|q| *q == w.quadrant());
-    ws.sort_by(|a, b| {
-        (a.kind.index(), q_index(a), &a.pos, &a.id).cmp(&(b.kind.index(), q_index(b), &b.pos, &b.id))
+    // リスト → 区分 (画面の並び) → 区分内の並び (Must は日時の順で日時なしは最後。Want は日時を持たない)
+    ws.sort_by_cached_key(|w| {
+        let q = Quadrant::ALL.iter().position(|q| q.holds(w));
+        let at = w.due().and_then(due::at);
+        (w.kind.index(), q, at.is_none(), at, w.pos.clone(), w.id.clone())
     });
     if json {
         println!("{}", serde_json::to_string_pretty(&ws)?);

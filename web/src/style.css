@@ -270,6 +270,21 @@ button {
   display: none;
 }
 
+/* Must: 学校の段を上、その他の段を下に重ねる。軸は引かず、段の名前を見出しに出す */
+.plane.rows .grid {
+  grid-template-columns: 1fr;
+  grid-auto-rows: auto;
+  gap: 14px;
+}
+
+.plane.rows .quad h2 {
+  display: flex;
+}
+
+.plane.rows .quad {
+  min-height: 0;
+}
+
 @media (max-width: 640px) {
   .plane {
     border: 0;

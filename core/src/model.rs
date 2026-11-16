@@ -3,7 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// どちらのリストのものか。
 ///
 /// - `Want` … やりたいこと。縦軸はエネルギー。日時は持たない
-/// - `Task` … 次にやること。縦軸は重要度。日時を持てる
+/// - `Task` … 次にやること。縦軸は「学校 / その他」の種類。clau度では分けず、日時を持てる
 /// - `Memo` … メモ。区分・日時・やった/しまったを持たず、名前とメモ本文だけ使う
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,13 +27,26 @@ impl Kind {
         }
     }
 
-    /// 縦軸の名前
+    /// 縦軸の名前。Must は高低ではなく「学校 / その他」の種類で分ける
     pub fn axis(self) -> &'static str {
         match self {
             Kind::Want => "エネルギー",
-            Kind::Task => "重要度",
+            Kind::Task => "種類",
             Kind::Memo => "",
         }
+    }
+
+    /// 縦軸の 高 / 低 の呼び名
+    pub fn axis_values(self) -> (&'static str, &'static str) {
+        match self {
+            Kind::Task => ("学校", "その他"),
+            _ => ("高", "低"),
+        }
+    }
+
+    /// clau度で区分を分けるか。Must は「学校 / その他」の2段だけで、clau度では分けない
+    pub fn splits_clau(self) -> bool {
+        self == Kind::Want
     }
 
     /// 日時を持てるか
@@ -91,7 +104,7 @@ pub struct Want {
     pub notes: String,
     #[serde(default)]
     pub kind: Kind,
-    /// 縦軸が高いか (やりたいこと = エネルギー高 / 次にやること = 重要度高)
+    /// 縦軸が高いか (やりたいこと = エネルギー高 / 次にやること = 学校)
     #[serde(alias = "energy")]
     pub axis_hi: bool,
     /// true = clau度高
@@ -140,7 +153,7 @@ impl Want {
         Quadrant { axis_hi: self.axis_hi, clau: self.clau }
     }
 
-    /// 区分の表示 (例: "エネルギー高・clau低")。メモは区分を持たないので空
+    /// 区分の表示 (例: "エネルギー高・clau低" / "学校")。メモは区分を持たないので空
     pub fn quadrant_label(&self) -> String {
         if !self.kind.is_list() {
             return String::new();
@@ -218,10 +231,28 @@ impl Quadrant {
         Quadrant { axis_hi: false, clau: true },
     ];
 
-    /// 軸の値をそのまま書いた表示 (例: "重要度高・clau低")
+    /// `kind` のリストで画面に出す区分 (`ALL` の添字)。Must は clau度で分けないので左の列の2つ
+    pub fn slots(kind: Kind) -> &'static [usize] {
+        if kind.splits_clau() {
+            &[0, 1, 2, 3]
+        } else {
+            &[0, 2]
+        }
+    }
+
+    /// `w` がこの区分に入るか。clau度で分けないリスト (Must) では縦軸だけ見る
+    pub fn holds(&self, w: &Want) -> bool {
+        w.axis_hi == self.axis_hi && (!w.kind.splits_clau() || w.clau == self.clau)
+    }
+
+    /// 軸の値をそのまま書いた表示 (例: "エネルギー高・clau低")。Must は "学校" / "その他" だけ
     pub fn label(&self, kind: Kind) -> String {
-        let hi = |b: bool| if b { "高" } else { "低" };
-        format!("{}{}・clau{}", kind.axis(), hi(self.axis_hi), hi(self.clau))
+        let (hi, lo) = kind.axis_values();
+        let axis = if self.axis_hi { hi } else { lo };
+        if !kind.splits_clau() {
+            return axis.to_string();
+        }
+        format!("{}{axis}・clau{}", kind.axis(), if self.clau { "高" } else { "低" })
     }
 }
 
@@ -285,6 +316,15 @@ pub fn sort_by_pos(wants: &mut [&Want]) {
     wants.sort_by(|a, b| (&a.pos, &a.id).cmp(&(&b.pos, &b.id)));
 }
 
+/// 日時の順に並べる。日時なしは最後で、同じ日時どうし・日時なしどうしは `(pos, id)` の順。
+/// Must の区分内の表示順 (Want は日時を持たないので `sort_by_pos` と同じになる)
+pub fn sort_by_due(wants: &mut [&Want]) {
+    wants.sort_by_cached_key(|w| {
+        let at = w.due().and_then(crate::due::at);
+        (at.is_none(), at, w.pos.clone(), w.id.clone())
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +358,41 @@ mod tests {
         assert!(w.is_active());
         assert_eq!(w.quadrant_label(), "エネルギー高・clau高");
         w.apply(&WantPatch { kind: Some(Kind::Task), ..Default::default() });
-        assert_eq!(w.quadrant_label(), "重要度高・clau高");
+        assert_eq!(w.quadrant_label(), "学校");
+        w.apply(&WantPatch { axis_hi: Some(false), ..Default::default() });
+        assert_eq!(w.quadrant_label(), "その他");
+    }
+
+    /// Must は clau度で分けず、縦軸 (学校 / その他) だけで区分に入る
+    #[test]
+    fn must_ignores_clau() {
+        let mut w = Want::new("a", Kind::Task, true, true, "V".into());
+        assert!(Quadrant::ALL[0].holds(&w));
+        assert!(!Quadrant::ALL[2].holds(&w));
+        w.kind = Kind::Want;
+        assert!(!Quadrant::ALL[0].holds(&w));
+        assert!(Quadrant::ALL[1].holds(&w));
+        assert_eq!(Quadrant::slots(Kind::Task), [0, 2]);
+    }
+
+    #[test]
+    fn sort_by_due_puts_undated_last() {
+        let mk = |t: &str, pos: &str, due: Option<&str>| {
+            let mut w = Want::new(t, Kind::Task, true, false, pos.into());
+            w.due_at = due.map(str::to_string);
+            w
+        };
+        let ws = [
+            mk("none-a", "A", None),
+            mk("late", "B", Some("2026-12-01")),
+            mk("none-0", "0", None),
+            mk("timed", "C", Some("2026-11-25T12:00:00+09:00")),
+            mk("day", "D", Some("2026-11-20")),
+        ];
+        let mut v: Vec<&Want> = ws.iter().collect();
+        sort_by_due(&mut v);
+        let titles: Vec<&str> = v.iter().map(|w| w.title.as_str()).collect();
+        assert_eq!(titles, ["day", "timed", "late", "none-0", "none-a"]);
     }
 
     #[test]

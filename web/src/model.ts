@@ -1,3 +1,5 @@
+import { at } from "./due.ts";
+
 /** どのリストのものか。memo は区分・日時を持たず、名前と本文だけ使う */
 export type Kind = "want" | "task" | "memo";
 
@@ -16,8 +18,14 @@ export const DONE_LABEL = "Done";
 /** 保管庫の名前 (4つめ) */
 export const ARCHIVE_LABEL = "Archive";
 
-/** 縦軸の名前 */
-export const axisLabel = (k: Kind) => (k === "task" ? "重要度" : "エネルギー");
+/** 縦軸の名前。Must は高低ではなく「学校 / その他」の種類で分ける */
+export const axisLabel = (k: Kind) => (k === "task" ? "種類" : "エネルギー");
+
+/** 縦軸の 高 / 低 の呼び名 */
+export const axisValues = (k: Kind): [string, string] => (k === "task" ? ["学校", "その他"] : ["高", "低"]);
+
+/** clau度で区分を分けるか。Must は「学校 / その他」の2段だけで、clau度では分けない */
+export const splitsClau = (k: Kind) => k === "want";
 
 /** 日時を持てるか */
 export const hasDue = (k: Kind) => k === "task";
@@ -30,7 +38,7 @@ export interface Want {
   title: string;
   notes: string;
   kind: Kind;
-  /** true = 縦軸が高い (やりたいこと = エネルギー高 / 次にやること = 重要度高) */
+  /** true = 縦軸が高い (やりたいこと = エネルギー高 / 次にやること = 学校) */
   axis_hi: boolean;
   /** true = clau度高 */
   clau: boolean;
@@ -62,13 +70,22 @@ export const QUADRANTS: Quadrant[] = [
   { axis_hi: false, clau: true },
 ];
 
-/** 軸の値をそのまま書いた表示 (例: "重要度高・clau低") */
+/** リスト kind で画面に出す区分 (QUADRANTS の添字)。Must は clau度で分けないので左の列の2つ */
+export const slotsOf = (k: Kind) => (splitsClau(k) ? [0, 1, 2, 3] : [0, 2]);
+
+/** 軸の値をそのまま書いた表示 (例: "エネルギー高・clau低")。Must は "学校" / "その他" だけ */
 export function label(q: Quadrant, kind: Kind): string {
-  const hi = (b: boolean) => (b ? "高" : "低");
-  return `${axisLabel(kind)}${hi(q.axis_hi)}・clau${hi(q.clau)}`;
+  const [hi, lo] = axisValues(kind);
+  const axis = q.axis_hi ? hi : lo;
+  if (!splitsClau(kind)) return axis;
+  return `${axisLabel(kind)}${axis}・clau${q.clau ? "高" : "低"}`;
 }
 
 export const sameQuadrant = (w: Quadrant, q: Quadrant) => w.axis_hi === q.axis_hi && w.clau === q.clau;
+
+/** w がリスト kind の区分 q に入るか。clau度で分けないリスト (Must) では縦軸だけ見る */
+export const holds = (q: Quadrant, kind: Kind, w: Want) =>
+  w.axis_hi === q.axis_hi && (!splitsClau(kind) || w.clau === q.clau);
 
 export const isActive = (w: Want) => !w.deleted && w.done_at === null && w.archived_at == null;
 
@@ -81,6 +98,14 @@ export const dueOf = (w: Want) => (hasDue(w.kind) ? w.due_at : null);
 /** 区分内の表示順 (pos, id) */
 export const byPos = (a: Want, b: Want) =>
   a.pos < b.pos ? -1 : a.pos > b.pos ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/** Must の区分内の表示順。日時の順で、日時なしは最後。同じ日時どうし・日時なしどうしは (pos, id) */
+export function byDue(a: Want, b: Want): number {
+  const da = dueOf(a);
+  const db = dueOf(b);
+  if (da == null || db == null) return (da == null) === (db == null) ? byPos(a, b) : da == null ? 1 : -1;
+  return at(da) - at(db) || byPos(a, b);
+}
 
 export const nowRfc3339 = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 

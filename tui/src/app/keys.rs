@@ -42,15 +42,15 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Want / Must",
         &[
-            ("h / l", "左 / 右の区分へ"),
-            ("o / O", "カーソルの下 / 上に追加"),
-            ("c / Enter", "編集 (名前・縦軸・clau度・日時)"),
+            ("h / l", "左 / 右の区分へ (Want)"),
+            ("o / O", "カーソルの下 / 上に追加 (Must は日時の順に入る)"),
+            ("c / Enter", "編集 (名前・区分・日時)"),
             ("s", "日時を編集 (Must のみ)"),
             ("t / a", "やった / しまう"),
             ("p / P", "dd で消したものをカーソルの下 / 上に貼る"),
-            ("J / K", "下 / 上へ動かす。区分の端では上下の区分へ移る"),
-            ("H / L", "左 / 右の区分へ動かす"),
-            ("X", "もう一方のリストへ移す"),
+            ("J / K", "下 / 上へ動かす。区分の端では上下の区分へ。Must は学校 ⇄ その他"),
+            ("H / L", "左 / 右の区分へ動かす (Want)"),
+            ("X", "もう一方のリストへ移す (Must へはその他に入る)"),
         ],
     ),
     (
@@ -77,8 +77,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("o", "範囲の反対の端へ"),
             ("d", "削除"),
             ("t / a", "やった / しまう"),
-            ("J / K", "まとめて下 / 上へ動かす"),
-            ("H / L / X", "左右の区分 / もう一方のリストへ"),
+            ("J / K", "まとめて下 / 上へ動かす (Must は学校 ⇄ その他)"),
+            ("H / L / X", "左右の区分 (Want) / もう一方のリストへ"),
             ("p", "元のリストに戻す (Done / Archive)"),
             ("Esc / v", "やめる"),
         ],
@@ -96,7 +96,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "編集のノーマルモード",
         &[
             ("j / k", "欄の移動"),
-            ("h / l / Space", "高 / 低 / 反転 (高低の欄)"),
+            ("h / l / Space", "左 / 右 / 反転 (2択の欄)"),
             ("i a I A", "挿入モードへ"),
             ("h l w b e 0 $", "カーソル移動 (名前・日時の欄)"),
             ("x D dd dw cc cw C S", "消す / 書き換える"),
@@ -328,6 +328,11 @@ impl App {
                 self.delete(ids);
                 return Mode::Normal;
             }
+            // Must は日時の順に並ぶので、範囲ごと上下の段 (学校 / その他) へ移す
+            (None, KeyCode::Char(c @ ('J' | 'K'))) if list && self.kind.has_due() => {
+                self.shift_row(&ids, c == 'J');
+                return Mode::Normal;
+            }
             // 範囲の下 / 上のものを反対側へ回して、範囲ごと動かす
             (None, KeyCode::Char('J')) if list => {
                 for _ in 0..n {
@@ -489,7 +494,7 @@ impl App {
         match key.code {
             KeyCode::Char('j') => e.move_field(true),
             KeyCode::Char('k') => e.move_field(false),
-            // 高低の切り替え (左が高。空白は反転)
+            // 2択の切り替え (左が高 / 学校。空白は反転)
             KeyCode::Char('h' | 'l' | ' ') | KeyCode::Left | KeyCode::Right => {
                 let v = match key.code {
                     KeyCode::Char(' ') => None,
@@ -616,9 +621,14 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
     }
 
-    /// 左上の区分の名前を並び順で
+    /// Want の区分の名前を並び順で
     fn titles(app: &App, qi: usize) -> Vec<String> {
         app.list(Kind::Want, Quadrant::ALL[qi]).iter().map(|w| w.title.clone()).collect()
+    }
+
+    /// Must の段 (0 = 学校 / 2 = その他) の名前を並び順で
+    fn must(app: &App, qi: usize) -> Vec<String> {
+        app.list(Kind::Task, Quadrant::ALL[qi]).iter().map(|w| w.title.clone()).collect()
     }
 
     #[test]
@@ -758,6 +768,46 @@ mod tests {
         press(&mut a, "jlZZ");
         let w = a.selected().unwrap();
         assert_eq!((w.title.as_str(), w.axis_hi), ("xyz", false));
+    }
+
+    #[test]
+    fn must_rows_by_due() {
+        let mut a = app();
+        press(&mut a, "gt");
+        press(&mut a, "oa\x1bob\x1boc\x1b");
+        assert_eq!(must(&a, 0), ["a", "b", "c"]);
+        // 日時を入れたものは日時の順に前へ、日時なしは最後
+        press(&mut a, "ggjs2030-01-02\n");
+        assert_eq!(must(&a, 0), ["b", "a", "c"]);
+        press(&mut a, "Gs2030-01-01\n");
+        assert_eq!(must(&a, 0), ["c", "b", "a"]);
+        // カーソルは日時を入れたものについていく
+        assert_eq!(a.selected().unwrap().title, "c");
+        // O でカーソルの上に足しても、日時なしなので最後に入る
+        press(&mut a, "Od\x1b");
+        assert_eq!(must(&a, 0), ["c", "b", "a", "d"]);
+        // J で学校からその他へ。その他からさらに J しても動かない
+        press(&mut a, "ggJ");
+        assert_eq!((must(&a, 0), must(&a, 2)), (vec!["b".to_string(), "a".into(), "d".into()], vec!["c".to_string()]));
+        assert_eq!((a.qi(), a.selected().unwrap().title.as_str()), (2, "c"));
+        press(&mut a, "J");
+        assert_eq!(must(&a, 2), ["c"]);
+        // 左右には動かない
+        press(&mut a, "L");
+        assert_eq!(must(&a, 2), ["c"]);
+        press(&mut a, "K");
+        assert_eq!(must(&a, 0), ["c", "b", "a", "d"]);
+        // ビジュアルモードでまとめてその他へ
+        press(&mut a, "ggvjJ");
+        assert_eq!(must(&a, 2), ["c", "b"]);
+        // Want から X で移すとその他に入り、Must に切り替わる
+        press(&mut a, "gTozz\x1bX");
+        assert_eq!(must(&a, 2), ["c", "b", "zz"]);
+        assert_eq!(a.kind, Kind::Task);
+        // 編集に clau度の欄は無く、j で日時の欄へ
+        press(&mut a, "c\x1bjj");
+        let Mode::Edit(e) = &a.mode else { panic!("編集ポップアップが開いていない") };
+        assert!(e.field == EditField::Due);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use ratatui::widgets::ListState;
 use std::ops::Range;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use wanna_core::{due, notes, now_rfc3339, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
+use wanna_core::{due, notes, now_rfc3339, pos, sort_by_due, sort_by_pos, Kind, Quadrant, Want, WantPatch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -84,12 +84,12 @@ impl Edit {
         }
     }
 
-    /// この1件で回れる欄。日時はリストによって出ない。メモは名前だけ
+    /// この1件で回れる欄。Must は clau度で分けないので clau度の欄を出さず、日時の欄を出す。メモは名前だけ
     pub fn fields(&self) -> &'static [EditField] {
         use EditField::*;
         match self.kind {
             Kind::Memo => &[Title],
-            k if k.has_due() => &[Title, Axis, Clau, Due],
+            k if k.has_due() => &[Title, Axis, Due],
             _ => &[Title, Axis, Clau],
         }
     }
@@ -154,7 +154,8 @@ pub struct App {
     /// 表示しているリスト。やったこと画面から戻る先でもある
     pub kind: Kind,
     pub mode: Mode,
-    /// カーソルのある区分 (`Quadrant::ALL` の添字)。リストをまたいで持ち越す
+    /// カーソルのある区分 (`Quadrant::ALL` の添字)。リストをまたいで持ち越す。
+    /// Must は左の列しか使わないので、読むときは `qi()` を通す
     pub cur: usize,
     /// リストごと・区分ごとの選択行
     pub lists: [[ListState; 4]; 2],
@@ -237,14 +238,16 @@ impl App {
 
     // ───────── 表示用のリスト ─────────
 
-    /// リスト・区分の中身。`(pos, id)` 順
+    /// リスト・区分の中身。Want は `(pos, id)` 順、Must は日時の順 (日時なしは最後)。
+    /// Must は clau度で分けないので、縦軸 (学校 / その他) だけで区分を見る
     pub fn list(&self, kind: Kind, q: Quadrant) -> Vec<&Want> {
-        let mut v: Vec<&Want> = self
-            .wants
-            .iter()
-            .filter(|w| w.is_active() && w.kind == kind && w.quadrant() == q)
-            .collect();
-        sort_by_pos(&mut v);
+        let mut v: Vec<&Want> =
+            self.wants.iter().filter(|w| w.is_active() && w.kind == kind && q.holds(w)).collect();
+        if kind.has_due() {
+            sort_by_due(&mut v);
+        } else {
+            sort_by_pos(&mut v);
+        }
         v
     }
 
@@ -289,8 +292,17 @@ impl App {
         }
     }
 
+    /// カーソルのある区分の添字。Must は clau度で分けないので左の列 (学校 / その他) に寄せる
+    pub fn qi(&self) -> usize {
+        if self.kind.splits_clau() {
+            self.cur
+        } else {
+            self.cur & !1
+        }
+    }
+
     pub fn cur_q(&self) -> Quadrant {
-        Quadrant::ALL[self.cur]
+        Quadrant::ALL[self.qi()]
     }
 
     fn cur_list(&self) -> Vec<&Want> {
@@ -298,11 +310,11 @@ impl App {
     }
 
     fn sel(&self) -> usize {
-        self.lists[self.kind.index()][self.cur].selected().unwrap_or(0)
+        self.lists[self.kind.index()][self.qi()].selected().unwrap_or(0)
     }
 
     fn select(&mut self, i: usize) {
-        let (k, c) = (self.kind.index(), self.cur);
+        let (k, c) = (self.kind.index(), self.qi());
         self.lists[k][c].select(Some(i));
     }
 
@@ -369,8 +381,8 @@ impl App {
     /// `id` のあるリスト・区分・行へカーソルを合わせる
     fn focus(&mut self, id: &str) {
         for kind in Kind::ALL {
-            for (qi, q) in Quadrant::ALL.iter().enumerate() {
-                if let Some(i) = self.list(kind, *q).iter().position(|w| w.id == id) {
+            for &qi in Quadrant::slots(kind) {
+                if let Some(i) = self.list(kind, Quadrant::ALL[qi]).iter().position(|w| w.id == id) {
                     self.kind = kind;
                     self.cur = qi;
                     self.lists[kind.index()][qi].select(Some(i));
@@ -393,7 +405,7 @@ impl App {
     fn move_cursor(&mut self, down: bool, n: usize, cross: bool) {
         for _ in 0..n {
             let (len, sel) = self.view();
-            let top = self.cur < 2;
+            let top = self.qi() < 2;
             if down && sel + 1 < len {
                 self.view_select(sel + 1);
             } else if !down && sel > 0 {
@@ -584,10 +596,10 @@ impl App {
 
     // ───────── 並び・移動 ─────────
 
-    /// リスト・区分の末尾に付ける pos
+    /// リスト・区分の末尾に付ける pos。Must は日時の順に並ぶので、表示の最後ではなく一番大きい pos の後ろ
     fn tail_pos(&self, kind: Kind, q: Quadrant) -> String {
         let list = self.list(kind, q);
-        pos::between(list.last().map(|w| w.pos.as_str()), None)
+        pos::between(list.iter().map(|w| w.pos.as_str()).max(), None)
     }
 
     /// 区分の `to` 番目に新しく入れる pos。前後の pos が重複していて挟めなければ None
@@ -601,15 +613,21 @@ impl App {
 
     /// `ids` をこの順で `kind` の区分 `q` の `to` 番目 (`ids` 自身を除いて数える) に置く。
     /// リストや区分が違えば移し、消した・やった・しまったものはリストに戻す。
-    /// pos が重複していて挟めなければ区分全体を振り直す
+    /// pos が重複していて挟めなければ区分全体を振り直す。
+    /// Must は日時の順に並び、pos は同じ日時どうしの順にしか効かないので、`to` によらず pos の順で末尾に足す
     fn put(&mut self, ids: &[String], kind: Kind, q: Quadrant, to: usize) {
-        let others: Vec<(String, String)> = self
+        let mut others: Vec<(String, String)> = self
             .list(kind, q)
             .into_iter()
             .filter(|w| !ids.contains(&w.id))
             .map(|w| (w.id.clone(), w.pos.clone()))
             .collect();
-        let to = to.min(others.len());
+        let to = if kind.has_due() {
+            others.sort_by(|a, b| a.1.cmp(&b.1));
+            others.len()
+        } else {
+            to.min(others.len())
+        };
         let a = to.checked_sub(1).map(|i| others[i].1.clone());
         let b = others.get(to).map(|o| o.1.clone());
         let (a, b) = (a.as_deref(), b.as_deref());
@@ -632,7 +650,8 @@ impl App {
             if ids.contains(&id) {
                 patch.kind = (w.kind != kind).then_some(kind);
                 patch.axis_hi = (w.axis_hi != q.axis_hi).then_some(q.axis_hi);
-                patch.clau = (w.clau != q.clau).then_some(q.clau);
+                // Must は clau度で分けないので、持っている値をそのまま残す
+                patch.clau = (kind.splits_clau() && w.clau != q.clau).then_some(q.clau);
                 patch.deleted = w.deleted.then_some(false);
                 patch.done_at = w.done_at.is_some().then_some(None);
                 patch.archived_at = w.archived_at.is_some().then_some(None);
@@ -655,26 +674,45 @@ impl App {
         self.put(&[id.to_string()], self.kind, self.cur_q(), to);
     }
 
-    /// 選んでいるものを区分の中で `n` 行下 (`down`) / 上へ。区分の端にいれば上下の区分へ移す
+    /// 選んでいるものを区分の中で `n` 行下 (`down`) / 上へ。区分の端にいれば上下の区分へ移す。
+    /// Must は日時の順に並ぶので、上下の段 (学校 / その他) へ移すだけ
     fn shift_vertical(&mut self, down: bool, n: usize) {
         let Some(id) = self.selected().map(|w| w.id.clone()) else { return };
+        if self.kind.has_due() {
+            self.shift_row(&[id], down);
+            return;
+        }
         let (len, sel) = self.view();
-        let top = self.cur < 2;
+        let qi = self.qi();
+        let top = qi < 2;
         if down && sel + 1 < len {
             self.place(&id, (sel + n).min(len - 1));
         } else if !down && sel > 0 {
             self.place(&id, sel.saturating_sub(n));
         } else if down && top {
-            self.put(&[id], self.kind, Quadrant::ALL[self.cur + 2], 0);
+            self.put(&[id], self.kind, Quadrant::ALL[qi + 2], 0);
         } else if !down && !top {
-            let q = Quadrant::ALL[self.cur - 2];
+            let q = Quadrant::ALL[qi - 2];
             let len = self.list(self.kind, q).len();
             self.put(&[id], self.kind, q, len);
         }
     }
 
+    /// Must で、学校の段のものを下 (その他) へ / その他の段のものを上 (学校) へ移す。段の中では日時の順に入る
+    fn shift_row(&mut self, ids: &[String], down: bool) {
+        let top = self.qi() < 2;
+        if ids.is_empty() || top != down {
+            return;
+        }
+        self.put(ids, self.kind, Quadrant::ALL[if down { 2 } else { 0 }], 0);
+    }
+
     /// 選んでいるもの (`ids`) を左右の区分へ移す。同じ行の高さに入る
     fn shift_horizontal(&mut self, ids: &[String], right: bool) {
+        if !self.kind.splits_clau() {
+            self.message = Some("Must は左右に分けていません (J / K で学校 ⇄ その他)".into());
+            return;
+        }
         let target = if right { self.cur | 1 } else { self.cur & !1 };
         if target == self.cur || ids.is_empty() {
             return;
@@ -683,15 +721,20 @@ impl App {
         self.put(ids, self.kind, Quadrant::ALL[target], at);
     }
 
-    /// もう一方のリストへ移す。行き先の同じ区分の末尾に入る
+    /// もう一方のリストへ移す。Must へは「その他」の段に (Want のものは学校の課題ではないので)、
+    /// Want へは持っている縦軸・clau度の区分の末尾に入る
     fn move_to_other_list(&mut self, ids: &[String]) {
         if ids.is_empty() {
             return;
         }
-        let (kind, q) = (self.kind, self.cur_q());
-        let to = kind.other();
-        let len = self.list(to, q).len();
-        self.put(ids, to, q, len);
+        let to = self.kind.other();
+        for id in ids {
+            let Some(w) = self.wants.iter().find(|w| &w.id == id) else { continue };
+            let q = if to.has_due() { Quadrant { axis_hi: false, clau: w.clau } } else { w.quadrant() };
+            let len = self.list(to, q).len();
+            self.put(std::slice::from_ref(id), to, q, len);
+        }
+        self.focus(&ids[0]);
         self.message = Some(match ids {
             [id] => format!("{}へ移しました: {}", to.label(), self.title(id)),
             _ => format!("{} 件を{}へ移しました", ids.len(), to.label()),
@@ -824,7 +867,8 @@ impl App {
             return;
         }
         let (kind, q) = (self.kind, self.cur_q());
-        let pos = self.pos_at(kind, q, at);
+        // Must は日時の順に並ぶので、カーソルの位置ではなく pos の順で末尾に足す
+        let pos = if kind.has_due() { Some(self.tail_pos(kind, q)) } else { self.pos_at(kind, q, at) };
         let w = Want::new(title, kind, q.axis_hi, q.clau, pos.clone().unwrap_or_else(|| self.tail_pos(kind, q)));
         let id = w.id.clone();
         self.commit(Op::Create { want: w });
@@ -846,8 +890,8 @@ impl App {
         let mut items: Vec<(usize, usize, bool)> = Vec::new();
         match self.past() {
             None => {
-                for (qi, q) in Quadrant::ALL.iter().enumerate() {
-                    for (i, w) in self.list(self.kind, *q).iter().enumerate() {
+                for &qi in Quadrant::slots(self.kind) {
+                    for (i, w) in self.list(self.kind, Quadrant::ALL[qi]).iter().enumerate() {
                         items.push((qi, i, !matches(&w.title, &query).is_empty()));
                     }
                 }
@@ -859,7 +903,7 @@ impl App {
             }
         }
         let cur = match self.screen {
-            Screen::List => (self.cur, self.sel()),
+            Screen::List => (self.qi(), self.sel()),
             _ => (0, self.view().1),
         };
         let len = items.len();
@@ -1055,7 +1099,7 @@ impl App {
         let q = Quadrant { axis_hi, clau };
         let cur = (w.kind, w.title.clone(), w.notes.clone(), w.axis_hi, w.clau, w.due_at.clone());
         // 区分が変わるなら移動先の末尾に置く
-        let pos = (w.quadrant() != q).then(|| self.tail_pos(cur.0, q));
+        let pos = (!q.holds(w)).then(|| self.tail_pos(cur.0, q));
         let patch = WantPatch {
             title: (!title.is_empty() && title != cur.1).then(|| title.to_string()),
             notes: (notes != cur.2).then(|| notes.to_string()),
@@ -1065,30 +1109,10 @@ impl App {
             due_at: (due != cur.5).then_some(due),
             ..Default::default()
         };
-        let reorder = patch.due_at.as_ref().is_some_and(|d| d.is_some());
+        // 日時を変えれば Must の中で並びも変わるので、カーソルはついていく
         if patch != WantPatch::default() {
             self.patch(id, patch);
             self.focus(id);
-        }
-        if reorder {
-            self.place_by_due(id);
-        }
-    }
-
-    /// 日時の順になる位置へ置く。自分より後の日時のものの直前、なければ日時を持つものの最後の後ろ。
-    /// 日時を持たないものの位置は気にしない
-    fn place_by_due(&mut self, id: &str) {
-        let at = |w: &Want| w.due().and_then(due::at);
-        let Some(t) = self.wants.iter().find(|w| w.id == id).and_then(at) else { return };
-        self.focus(id);
-        let others: Vec<&Want> = self.cur_list().into_iter().filter(|w| w.id != id).collect();
-        let to = others
-            .iter()
-            .position(|w| at(w).is_some_and(|x| x > t))
-            .or_else(|| others.iter().rposition(|w| at(w).is_some()).map(|i| i + 1));
-        let cur = self.sel();
-        if let Some(to) = to.filter(|&to| to != cur) {
-            self.place(id, to);
         }
     }
 

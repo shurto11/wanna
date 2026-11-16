@@ -42,7 +42,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_tabs(f, app, tabs);
     match app.screen {
-        Screen::List => draw_grid(f, app, main),
+        Screen::List if app.kind.splits_clau() => draw_grid(f, app, main),
+        Screen::List => draw_rows(f, app, main),
         Screen::Done | Screen::Archive | Screen::Memo => draw_past(f, app, main),
     }
     if let Some(side) = side {
@@ -132,9 +133,24 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// Must。学校の段を上、その他の段を下に重ね、どちらも日時の順に並べる (上から順にやる)。
+/// 段の高さは中身の数に合わせて分ける
+fn draw_rows(f: &mut Frame, app: &mut App, area: Rect) {
+    let kind = app.kind;
+    let slots = Quadrant::slots(kind);
+    let weights: Vec<Constraint> = slots
+        .iter()
+        .map(|&qi| Constraint::Fill(app.list(kind, Quadrant::ALL[qi]).len().max(1) as u16 + 2))
+        .collect();
+    let rows = Layout::vertical(weights).split(area);
+    for (&qi, r) in slots.iter().zip(rows.iter()) {
+        draw_quadrant(f, app, qi, Quadrant::ALL[qi], *r);
+    }
+}
+
 fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rect) {
     let kind = app.kind;
-    let focused = app.cur == qi;
+    let focused = app.qi() == qi;
     let list = app.list(kind, q);
     let now = chrono::Local::now().naive_local();
     // 日時の欄は区分ごとに幅を揃える。日時が1つも無ければ欄そのものを出さない
@@ -173,16 +189,21 @@ fn draw_quadrant(f: &mut Frame, app: &mut App, qi: usize, q: Quadrant, area: Rec
             item(spans, in_visual)
         })
         .collect();
-    let empty = list.is_empty();
+    let (empty, count) = (list.is_empty(), list.len());
     if focused {
         app.view_rows = area.height.saturating_sub(2) as usize;
     }
 
     let border = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(DIM) };
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(if focused { BorderType::Thick } else { BorderType::Rounded })
         .border_style(border);
+    // Must の段は位置だけでは区別できないので、名前と数を枠に出す
+    if !kind.splits_clau() {
+        let head = if focused { Style::new().fg(ACCENT).bold() } else { Style::new().fg(DIM) };
+        block = block.title(Span::styled(format!(" {} {count} ", q.label(kind)), head));
+    }
 
     let highlight = if focused {
         Style::new().bg(ACCENT).fg(Color::Black).add_modifier(Modifier::BOLD)
@@ -384,6 +405,9 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 fn footer(app: &App) -> &'static str {
     let visual = matches!(app.mode, Mode::Visual { .. });
     match (app.screen, visual) {
+        (Screen::List, true) if app.kind == Kind::Task => {
+            "j/k:範囲 t:やった a:しまう d:削除 J/K:学校⇄その他 X:Wantへ Esc:やめる"
+        }
         (Screen::List, true) => {
             "j/k:範囲 t:やった a:しまう d:削除 J/K:並べ替え H/L:左右へ X:もう一方へ Esc:やめる"
         }
@@ -391,7 +415,7 @@ fn footer(app: &App) -> &'static str {
         (Screen::Archive, true) => "j/k:範囲 p:リストに戻す t:やった d:削除 Esc:やめる",
         (Screen::Memo, true) => "j/k:範囲 d:削除 Esc:やめる",
         (Screen::List, false) if app.kind == Kind::Task => {
-            "o:追加 c:編集 s:日時 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 HJKL:動かす X:Wantへ v:選択 /:検索 ?:ヘルプ"
+            "o:追加 c:編集 s:日時 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 J/K:学校⇄その他 X:Wantへ v:選択 /:検索 ?:ヘルプ"
         }
         (Screen::List, false) => {
             "o:追加 c:編集 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 HJKL:動かす X:Mustへ v:選択 /:検索 ?:ヘルプ"
@@ -455,6 +479,8 @@ fn draw_popup(f: &mut Frame, app: &App) {
             draw_field(f, "名前 ", input, true, line);
             let h = if memo {
                 "Enter/Esc:作って本文をエディタで開く  Ctrl+C:やめる".to_string()
+            } else if app.kind.has_due() {
+                format!("Enter/Esc:「{}」に追加 (日時の順に並ぶ。s で日時)  Ctrl+C:やめる", app.cur_q().label(app.kind))
             } else {
                 format!("Enter/Esc:「{}」の {} 番目に追加  Ctrl+C:やめる", app.cur_q().label(app.kind), at + 1)
             };
@@ -468,7 +494,9 @@ fn draw_popup(f: &mut Frame, app: &App) {
 fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
     let memo = e.kind == Kind::Memo;
     let has_due = e.kind.has_due();
-    let height = 16 + u16::from(has_due) * 2 + u16::from(e.error.is_some()) - u16::from(memo) * 3;
+    // 2択の欄の数。Must は clau度で分けないので縦軸 (学校 / その他) だけ
+    let choices: u16 = if memo { 0 } else if e.kind.splits_clau() { 2 } else { 1 };
+    let height = 13 + choices + u16::from(choices > 0) + u16::from(has_due) * 2 + u16::from(e.error.is_some());
     let r = popup_area(area, 70, height);
     f.render_widget(Clear, r);
     let block = popup_block(&format!("{} を編集", e.kind.label()));
@@ -477,7 +505,7 @@ fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
 
     let mut rows = vec![Constraint::Length(2)];
     if !memo {
-        rows.push(Constraint::Length(3));
+        rows.push(Constraint::Length(choices + 1));
     }
     if has_due {
         rows.push(Constraint::Length(2));
@@ -499,13 +527,12 @@ fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
         // 軸の名前は長さが違うので、ラベルの幅を揃えてから並べる
         let labels = [e.kind.axis(), "clau度"];
         let w = labels.iter().map(|l| l.width()).max().unwrap_or(0);
-        f.render_widget(
-            Paragraph::new(vec![
-                choice(&pad(labels[0], w), "高", "低", e.axis_hi, e.field == EditField::Axis),
-                choice(&pad(labels[1], w), "高", "低", e.clau, e.field == EditField::Clau),
-            ]),
-            take(),
-        );
+        let (hi, lo) = e.kind.axis_values();
+        let mut lines = vec![choice(&pad(labels[0], w), hi, lo, e.axis_hi, e.field == EditField::Axis)];
+        if e.kind.splits_clau() {
+            lines.push(choice(&pad(labels[1], w), "高", "低", e.clau, e.field == EditField::Clau));
+        }
+        f.render_widget(Paragraph::new(lines), take());
     }
 
     if has_due {
@@ -546,7 +573,7 @@ fn draw_edit(f: &mut Frame, e: &Edit, area: Rect) {
     } else if e.typing() {
         Line::from("i/a:挿入  j/k:欄  Enter/:w:保存  Esc/q:やめる  Tab:メモ".fg(DIM))
     } else {
-        Line::from("h/l:高低  j/k:欄  Enter/:w:保存  Esc/q:やめる  Tab:メモ".fg(DIM))
+        Line::from("h/l:選ぶ  j/k:欄  Enter/:w:保存  Esc/q:やめる  Tab:メモ".fg(DIM))
     };
     f.render_widget(Paragraph::new(line), help);
 }

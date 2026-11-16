@@ -8,15 +8,20 @@ import {
   MEMO_LABEL,
   QUADRANTS,
   axisLabel,
+  axisValues,
+  byDue,
   byPos,
   dueOf,
   hasDue,
+  holds,
   isActive,
   isArchived,
   kindLabel,
   label,
   nowRfc3339,
   sameQuadrant,
+  slotsOf,
+  splitsClau,
   uuidv7,
   type Kind,
   type Quadrant,
@@ -111,10 +116,10 @@ document.querySelector("#app")!.innerHTML = `
           <label><input type="radio" name="kind" value="task" />${kindLabel("task")}</label>
         </fieldset>
         <fieldset class="seg"><legend id="axis-legend">エネルギー</legend>
-          <label><input type="radio" name="axis_hi" value="1" />高</label>
-          <label><input type="radio" name="axis_hi" value="0" />低</label>
+          <label><input type="radio" name="axis_hi" value="1" /><span id="axis-hi">高</span></label>
+          <label><input type="radio" name="axis_hi" value="0" /><span id="axis-lo">低</span></label>
         </fieldset>
-        <fieldset class="seg"><legend>clau度</legend>
+        <fieldset class="seg" id="clau-field"><legend>clau度</legend>
           <label><input type="radio" name="clau" value="1" />高</label>
           <label><input type="radio" name="clau" value="0" />低</label>
         </fieldset>
@@ -146,17 +151,15 @@ document.querySelector("#app")!.innerHTML = `
 const store = await Store.open();
 let dragging = false;
 
-// ───────── 2×2 グリッド (リストごとに1枚) ─────────
+// ───────── 区分 (リストごとに1枚) ─────────
 
-/** 1枚の面を組み立てる。区分の位置で軸がわかるので、見出しは1列表示のときだけ出す */
+/** 1枚の面を組み立てる。Want は 2×2 で、区分の位置で軸がわかるので見出しは1列表示のときだけ出す。
+ *  Must は学校の段を上、その他の段を下に重ね、段の中は日時の順に並べる (見出しを常に出す) */
 function buildPlane(kind: Kind): HTMLOListElement[] {
   const grid = h("div", { class: "grid" });
-  const section = h(
-    "section",
-    { id: `view-${kind}`, class: "view" },
-    h(
-      "div",
-      { class: "plane" },
+  const plane = h("div", { class: splitsClau(kind) ? "plane" : "plane rows" });
+  if (splitsClau(kind))
+    plane.append(
       h(
         "div",
         { class: "axis axis-y", "aria-hidden": "true" },
@@ -169,12 +172,14 @@ function buildPlane(kind: Kind): HTMLOListElement[] {
         h("span", { class: "lo" }, "clau低"),
         h("span", { class: "hi" }, "clau高"),
       ),
-      grid,
-    ),
-  );
-  $("#view-done").before(section);
+    );
+  plane.append(grid);
+  $("#view-done").before(h("section", { id: `view-${kind}`, class: "view" }, plane));
 
-  return QUADRANTS.map((q, qi) => {
+  // 添字は QUADRANTS のもの。Must は左の列の2つだけ埋まる
+  const lists: HTMLOListElement[] = [];
+  for (const qi of slotsOf(kind)) {
+    const q = QUADRANTS[qi];
     const list = h("ol", { class: "list", "data-q": String(qi) });
     const input = h("input", {
       placeholder: "＋ 追加",
@@ -200,6 +205,8 @@ function buildPlane(kind: Kind): HTMLOListElement[] {
     );
     Sortable.create(list, {
       group: kind,
+      // Must は日時の順に並ぶので、段の中では並べ替えない (段の間へは動かせる)
+      sort: !hasDue(kind),
       animation: 150,
       delay: 180,
       delayOnTouchOnly: true,
@@ -213,20 +220,24 @@ function buildPlane(kind: Kind): HTMLOListElement[] {
         place(e.item.dataset.id!, kind, QUADRANTS[Number(e.to.dataset.q)], e.newIndex ?? 0);
       },
     });
-    return list;
-  });
+    lists[qi] = list;
+  }
+  return lists;
 }
 
 const planes = new Map<Kind, HTMLOListElement[]>(KINDS.map((k) => [k, buildPlane(k)]));
 
+/** リスト・区分の中身。Want は pos の順、Must は日時の順 (日時なしは最後)。Must は clau度で分けない */
 function listOf(kind: Kind, q: Quadrant, except?: string): Want[] {
   return [...store.wants.values()]
-    .filter((w) => isActive(w) && w.kind === kind && sameQuadrant(w, q) && w.id !== except)
-    .sort(byPos);
+    .filter((w) => isActive(w) && w.kind === kind && holds(q, kind, w) && w.id !== except)
+    .sort(hasDue(kind) ? byDue : byPos);
 }
 
+/** 区分の末尾に付ける pos。Must は日時の順に並ぶので、表示の最後ではなく一番大きい pos の後ろ */
 function tailPos(kind: Kind, q: Quadrant, except?: string): string {
-  return between(listOf(kind, q, except).at(-1)?.pos ?? null, null);
+  const max = listOf(kind, q, except).reduce<string | null>((m, w) => (m === null || w.pos > m ? w.pos : m), null);
+  return between(max, null);
 }
 
 function add(title: string, kind: Kind, q: Quadrant) {
@@ -254,10 +265,15 @@ function patch(id: string, p: WantPatch) {
   store.commit({ op: "patch", id, patch: p });
 }
 
-/** id をリスト kind の区分 q の index 番目に置く。pos が重複して挟めなければ区分全体を振り直す */
+/** id をリスト kind の区分 q の index 番目に置く。pos が重複して挟めなければ区分全体を振り直す。
+ *  Must は日時の順に並ぶので、段だけ移して pos は末尾にする (clau度は持っている値のまま) */
 function place(id: string, kind: Kind, q: Quadrant, index: number) {
   const w = store.wants.get(id);
   if (!w) return;
+  if (hasDue(kind)) {
+    if (w.axis_hi !== q.axis_hi) patch(id, { axis_hi: q.axis_hi, pos: tailPos(kind, q, id) });
+    return;
+  }
   const others = listOf(kind, q, id);
   const a = others[index - 1]?.pos ?? null;
   const b = others[index]?.pos ?? null;
@@ -281,8 +297,8 @@ function markDone(id: string) {
 
 function renderPlane(kind: Kind) {
   const now = new Date();
-  QUADRANTS.forEach((q, qi) => {
-    const items = listOf(kind, q);
+  for (const qi of slotsOf(kind)) {
+    const items = listOf(kind, QUADRANTS[qi]);
     planes.get(kind)![qi].replaceChildren(
       ...items.map((w, i) => {
         const check = h("button", { class: "check", title: "やった", "aria-label": `${w.title} をやった` });
@@ -305,7 +321,7 @@ function renderPlane(kind: Kind) {
       }),
     );
     $<HTMLSpanElement>(`#view-${kind} .quad[data-q="${qi}"] .count`).textContent = String(items.length);
-  });
+  }
 }
 
 // ───────── やったこと / 保管庫 ─────────
@@ -536,16 +552,21 @@ const edForm = $<HTMLFormElement>("form", editor);
 const dueField = $<HTMLLabelElement>("#due-field");
 const dueError = $<HTMLParagraphElement>("#due-error");
 const axisLegend = $<HTMLLegendElement>("#axis-legend");
+const axisHi = $<HTMLSpanElement>("#axis-hi");
+const axisLo = $<HTMLSpanElement>("#axis-lo");
+const clauField = $<HTMLFieldSetElement>("#clau-field");
 let editing: string | null = null;
 
 type Fields = Record<string, HTMLInputElement & RadioNodeList>;
 const fields = () => edForm.elements as unknown as Fields;
 const formKind = () => fields().kind.value as Kind;
 
-/** リストによって縦軸の名前と日時欄が変わる */
+/** リストによって縦軸の名前と日時欄が変わる。Must は clau度で分けないので clau度の欄を隠す */
 function syncEditorKind() {
   const kind = formKind();
   axisLegend.textContent = axisLabel(kind);
+  [axisHi.textContent, axisLo.textContent] = axisValues(kind);
+  clauField.hidden = !splitsClau(kind);
   dueField.hidden = !hasDue(kind);
   if (dueField.hidden) dueError.hidden = true;
 }
@@ -595,7 +616,8 @@ edForm.addEventListener("submit", (e) => {
   if (title && title !== w.title) p.title = title;
   const notes = f.notes.value.trimEnd();
   if (notes !== w.notes) p.notes = notes;
-  const q = { axis_hi: f.axis_hi.value === "1", clau: f.clau.value === "1" };
+  // Must では clau度の欄を出さないので、持っている値のまま
+  const q = { axis_hi: f.axis_hi.value === "1", clau: splitsClau(kind) ? f.clau.value === "1" : w.clau };
   if (kind !== w.kind || !sameQuadrant(w, q))
     Object.assign(p, { kind, ...q, pos: tailPos(kind, q, w.id) });
   if (dueAt !== (w.due_at ?? null)) p.due_at = dueAt;

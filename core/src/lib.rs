@@ -8,4 +8,4 @@ pub mod pos;
 #[cfg(feature = "client")]
 pub mod client;
 
-pub use model::{now_rfc3339, sort_by_pos, Kind, Quadrant, SyncResponse, Want, WantPatch};
+pub use model::{now_rfc3339, sort_by_due, sort_by_pos, Kind, Quadrant, SyncResponse, Want, WantPatch};
