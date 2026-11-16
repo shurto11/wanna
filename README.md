@@ -140,9 +140,11 @@ Want / Must の空のメモには見出し（`Why` / `Done when` / `Next steps` 
 ```
 wanna ls [--want|--must|--memo] [--done|--archived] [--json]
 wanna show [ID] [--json]
-wanna new <タイトル> [--want] [--lo] [--no-clau] [--link]
+wanna new <タイトル> [--want] [--lo] [--no-clau] [--due <日時>] [--link]
 wanna log [-c] <ID> <テキスト...>
 wanna note <ID> <見出し> [テキスト...|-]
+wanna title <ID> <タイトル...>
+wanna due <ID> <日時...|->
 wanna done <ID>
 wanna archive <ID>
 wanna link [ID] / wanna unlink

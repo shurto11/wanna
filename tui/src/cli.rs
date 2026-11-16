@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use wanna_core::client::{Client, Conflict};
-use wanna_core::{notes, Kind, Quadrant, Want, WantPatch};
+use wanna_core::{due, notes, Kind, Quadrant, Want, WantPatch};
 
 const USAGE: &str = "\
 使い方: wanna <コマンド> ...   (引数なしで TUI)
@@ -18,10 +18,13 @@ const USAGE: &str = "\
   ls [--want|--must|--memo] [--done|--archived] [--json]
                                          一覧 (既定は両方のやってない・しまってないもの。メモは --memo)
   show [ID] [--json]                     1件とメモを出す (ID 省略で @)
-  new <タイトル> [--want] [--lo] [--no-clau] [--link]
-                                         テンプレート入りで作る (既定は Must・重要度高・clau高)
+  new <タイトル> [--want] [--lo] [--no-clau] [--due <日時>] [--link]
+                                         テンプレート入りで作る (既定は Must・重要度高・clau高。
+                                         日時は Must のみ。書き方は TUI の日時欄と同じ)
   log [-c] <ID> <テキスト...>            進捗ログに日付付きで1行足す (-c で [c] を付ける)
   note <ID> <見出し> [テキスト...|-]     見出しの本文を置き換える (- で標準入力。省略で表示)
+  title <ID> <タイトル...>               タイトルを変える
+  due <ID> <日時...|->                   日時を変える (Must のみ。- で消す。書き方は new の --due と同じ)
   done <ID>                              やったことにする
   archive <ID>                           保管庫にしまう (やってないがリストに置くほどでもないもの)
   link [ID]                              このディレクトリに1件を紐付ける (省略で今の紐付けを表示)
@@ -40,6 +43,10 @@ struct Link {
 
 pub fn run(args: &[String]) -> Result<()> {
     let (cmd, rest) = args.split_first().context(USAGE)?;
+    let (due_input, rest) = take_due(rest)?;
+    if due_input.is_some() && cmd != "new" {
+        bail!("--due は new でだけ使えます");
+    }
     let (flags, pos): (Vec<&str>, Vec<&str>) = rest
         .iter()
         .map(String::as_str)
@@ -68,7 +75,12 @@ pub fn run(args: &[String]) -> Result<()> {
                 bail!("タイトルが必要です\n\n{USAGE}");
             }
             let kind = if has("--want") { Kind::Want } else { Kind::Task };
-            new(&client()?, title.trim(), kind, !has("--lo"), !has("--no-clau"), has("--link"))
+            let due_at = match due_input {
+                Some(_) if !kind.has_due() => bail!("Want は日時を持てません"),
+                Some(s) => due::parse_input(&s, chrono::Local::now().naive_local()).map_err(anyhow::Error::msg)?,
+                None => None,
+            };
+            new(&client()?, title.trim(), kind, !has("--lo"), !has("--no-clau"), due_at, has("--link"))
         }
         "log" => {
             let [id, text @ ..] = pos.as_slice() else { bail!(USAGE) };
@@ -100,6 +112,39 @@ pub fn run(args: &[String]) -> Result<()> {
             };
             let w = rewrite(&c, id, |n| notes::set_section(n, name, &body))?;
             println!("{}: 「{name}」を書き換えました", w.title);
+            Ok(())
+        }
+        "title" => {
+            let [id, title @ ..] = pos.as_slice() else { bail!(USAGE) };
+            let title = title.join(" ");
+            if title.trim().is_empty() {
+                bail!("タイトルが必要です");
+            }
+            let c = client()?;
+            let w = find(&c, id)?;
+            let p = WantPatch { title: Some(title.trim().to_string()), ..Default::default() };
+            let new = c.patch(&w.id, &p)?;
+            println!("タイトルを変えました: {} → {}", w.title, new.title);
+            Ok(())
+        }
+        "due" => {
+            let [id, input @ ..] = pos.as_slice() else { bail!(USAGE) };
+            if input.is_empty() {
+                bail!("日時が必要です (消すなら -)");
+            }
+            let c = client()?;
+            let w = find(&c, id)?;
+            if !w.kind.has_due() {
+                bail!("{} は日時を持てません", w.kind.label());
+            }
+            let due_at = if input == ["-"] {
+                None
+            } else {
+                due::parse_input(&input.join(" "), chrono::Local::now().naive_local()).map_err(anyhow::Error::msg)?
+            };
+            let p = WantPatch { due_at: Some(due_at), ..Default::default() };
+            let w = c.patch(&w.id, &p)?;
+            println!("日時: {}  {}", w.due().unwrap_or("なし"), w.title);
             Ok(())
         }
         "done" => {
@@ -144,6 +189,23 @@ pub fn run(args: &[String]) -> Result<()> {
 
 const KNOWN_FLAGS: &[&str] =
     &["--want", "--must", "--memo", "--done", "--archived", "--json", "--lo", "--no-clau", "--link", "-c"];
+
+/// `--due <日時>` / `--due=<日時>` を抜き出す。値を取るオプションはこれだけ
+fn take_due(args: &[String]) -> Result<(Option<String>, Vec<String>)> {
+    let mut due = None;
+    let mut rest = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--due" {
+            due = Some(it.next().context("--due の後に日時が必要です")?.clone());
+        } else if let Some(v) = a.strip_prefix("--due=") {
+            due = Some(v.to_string());
+        } else {
+            rest.push(a.clone());
+        }
+    }
+    Ok((due, rest))
+}
 
 /// ls でどこを出すか
 enum Shelf {
@@ -287,12 +349,22 @@ fn show(c: &Client, id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn new(c: &Client, title: &str, kind: Kind, axis_hi: bool, clau: bool, and_link: bool) -> Result<()> {
+fn new(
+    c: &Client,
+    title: &str,
+    kind: Kind,
+    axis_hi: bool,
+    clau: bool,
+    due_at: Option<String>,
+    and_link: bool,
+) -> Result<()> {
     // pos を空で送るとサーバーが区分の末尾に付ける
     let mut w = Want::new(title, kind, axis_hi, clau, String::new());
     w.notes = notes::template();
+    w.due_at = due_at;
     let w = c.create(&w)?;
-    println!("{}  {}  {}  {}", short(&w.id), w.kind.label(), w.quadrant_label(), w.title);
+    let due = w.due().unwrap_or("");
+    println!("{}  {}  {}  {}  {}", short(&w.id), w.kind.label(), w.quadrant_label(), due, w.title);
     if and_link {
         link(&w)?;
     }
