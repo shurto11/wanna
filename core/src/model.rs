@@ -3,7 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// どちらのリストのものか。
 ///
 /// - `Want` … やりたいこと。縦軸はエネルギー。日時は持たない
-/// - `Task` … 次にやること。縦軸は「学校 / その他」の種類。clau度では分けず、日時を持てる
+/// - `Task` … 次にやること。縦軸は「学校 / その他」の種類。clau度では分けず、日時を持てる。
+///   並びは Want と同じく手動で、日時を入れたときと段を移したときだけ日時の位置に入る (`due_index`)
 /// - `Memo` … メモ。区分・日時・やった/しまったを持たず、名前とメモ本文だけ使う
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -316,13 +317,15 @@ pub fn sort_by_pos(wants: &mut [&Want]) {
     wants.sort_by(|a, b| (&a.pos, &a.id).cmp(&(&b.pos, &b.id)));
 }
 
-/// 日時の順に並べる。日時なしは最後で、同じ日時どうし・日時なしどうしは `(pos, id)` の順。
-/// Must の区分内の表示順 (Want は日時を持たないので `sort_by_pos` と同じになる)
-pub fn sort_by_due(wants: &mut [&Want]) {
-    wants.sort_by_cached_key(|w| {
-        let at = w.due().and_then(crate::due::at);
-        (at.is_none(), at, w.pos.clone(), w.id.clone())
-    });
+/// 表示順の `list` (入れるもの自身は除く) のどこに日時 `due` のものを入れるか。
+/// 自分より後の日時のものの直前、無ければ日時を持つものの最後の後ろ (日時なしのものより前)。
+/// 並びは手動なので、日時を入れたときと段を移したときにだけ使う
+pub fn due_index(list: &[&Want], due: &str) -> usize {
+    let at = |w: &Want| w.due().and_then(crate::due::at);
+    let t = crate::due::at(due);
+    list.iter()
+        .position(|w| at(w).is_some_and(|x| Some(x) > t))
+        .unwrap_or_else(|| list.iter().rposition(|w| at(w).is_some()).map_or(0, |i| i + 1))
 }
 
 #[cfg(test)]
@@ -376,23 +379,30 @@ mod tests {
     }
 
     #[test]
-    fn sort_by_due_puts_undated_last() {
-        let mk = |t: &str, pos: &str, due: Option<&str>| {
-            let mut w = Want::new(t, Kind::Task, true, false, pos.into());
+    fn due_index_keeps_manual_order() {
+        let mk = |due: Option<&str>| {
+            let mut w = Want::new("a", Kind::Task, true, false, "V".into());
             w.due_at = due.map(str::to_string);
             w
         };
+        // 手で並べた結果、日時の順になっていないところもある
         let ws = [
-            mk("none-a", "A", None),
-            mk("late", "B", Some("2026-12-01")),
-            mk("none-0", "0", None),
-            mk("timed", "C", Some("2026-11-25T12:00:00+09:00")),
-            mk("day", "D", Some("2026-11-20")),
+            mk(Some("2026-11-20")),
+            mk(None),
+            mk(Some("2026-11-25T12:00:00+09:00")),
+            mk(Some("2026-12-01")),
+            mk(None),
         ];
-        let mut v: Vec<&Want> = ws.iter().collect();
-        sort_by_due(&mut v);
-        let titles: Vec<&str> = v.iter().map(|w| w.title.as_str()).collect();
-        assert_eq!(titles, ["day", "timed", "late", "none-0", "none-a"]);
+        let v: Vec<&Want> = ws.iter().collect();
+        assert_eq!(due_index(&v, "2026-11-01"), 0);
+        // 自分より後の日時の最初のものの直前
+        assert_eq!(due_index(&v, "2026-11-21"), 2);
+        assert_eq!(due_index(&v, "2026-11-26"), 3);
+        // 後の日時が無ければ、日時を持つものの最後の後ろ
+        assert_eq!(due_index(&v, "2027-01-01"), 4);
+        // 日時を持つものが無ければ先頭
+        let none = [mk(None), mk(None)];
+        assert_eq!(due_index(&none.iter().collect::<Vec<_>>(), "2026-11-20"), 0);
     }
 
     #[test]

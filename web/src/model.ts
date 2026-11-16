@@ -99,12 +99,19 @@ export const dueOf = (w: Want) => (hasDue(w.kind) ? w.due_at : null);
 export const byPos = (a: Want, b: Want) =>
   a.pos < b.pos ? -1 : a.pos > b.pos ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
-/** Must の区分内の表示順。日時の順で、日時なしは最後。同じ日時どうし・日時なしどうしは (pos, id) */
-export function byDue(a: Want, b: Want): number {
-  const da = dueOf(a);
-  const db = dueOf(b);
-  if (da == null || db == null) return (da == null) === (db == null) ? byPos(a, b) : da == null ? 1 : -1;
-  return at(da) - at(db) || byPos(a, b);
+/** 表示順の list (入れるもの自身は除く) のどこに日時 d のものを入れるか。
+ *  自分より後の日時のものの直前、無ければ日時を持つものの最後の後ろ (core の due_index と同じ)。
+ *  並びは手動なので、日時を入れたときと段を移したときにだけ使う */
+export function dueIndex(list: Want[], d: string): number {
+  const t = at(d);
+  const dated = (w: Want) => dueOf(w) != null;
+  const later = list.findIndex((w) => dated(w) && at(dueOf(w)!) > t);
+  if (later >= 0) return later;
+  let last = -1;
+  list.forEach((w, i) => {
+    if (dated(w)) last = i;
+  });
+  return last + 1;
 }
 
 export const nowRfc3339 = () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z");

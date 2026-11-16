@@ -133,8 +133,7 @@ fn draw_grid(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Must。学校の段を上、その他の段を下に重ね、どちらも日時の順に並べる (上から順にやる)。
-/// 段の高さは中身の数に合わせて分ける
+/// Must。学校の段を上、その他の段を下に重ねる (上から順にやる)。段の高さは中身の数に合わせて分ける
 fn draw_rows(f: &mut Frame, app: &mut App, area: Rect) {
     let kind = app.kind;
     let slots = Quadrant::slots(kind);
@@ -406,7 +405,7 @@ fn footer(app: &App) -> &'static str {
     let visual = matches!(app.mode, Mode::Visual { .. });
     match (app.screen, visual) {
         (Screen::List, true) if app.kind == Kind::Task => {
-            "j/k:範囲 t:やった a:しまう d:削除 J/K:学校⇄その他 X:Wantへ Esc:やめる"
+            "j/k:範囲 t:やった a:しまう d:削除 J/K:並べ替え H/L:学校/その他へ X:Wantへ Esc:やめる"
         }
         (Screen::List, true) => {
             "j/k:範囲 t:やった a:しまう d:削除 J/K:並べ替え H/L:左右へ X:もう一方へ Esc:やめる"
@@ -415,7 +414,7 @@ fn footer(app: &App) -> &'static str {
         (Screen::Archive, true) => "j/k:範囲 p:リストに戻す t:やった d:削除 Esc:やめる",
         (Screen::Memo, true) => "j/k:範囲 d:削除 Esc:やめる",
         (Screen::List, false) if app.kind == Kind::Task => {
-            "o:追加 c:編集 s:日時 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 J/K:学校⇄その他 X:Wantへ v:選択 /:検索 ?:ヘルプ"
+            "o:追加 c:編集 s:日時 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 J/K:並べ替え H/L:学校/その他 X:Wantへ v:選択 /:検索 ?:ヘルプ"
         }
         (Screen::List, false) => {
             "o:追加 c:編集 m:メモ t:やった a:しまう dd:削除 p:貼る u:取消 HJKL:動かす X:Mustへ v:選択 /:検索 ?:ヘルプ"
@@ -479,8 +478,6 @@ fn draw_popup(f: &mut Frame, app: &App) {
             draw_field(f, "名前 ", input, true, line);
             let h = if memo {
                 "Enter/Esc:作って本文をエディタで開く  Ctrl+C:やめる".to_string()
-            } else if app.kind.has_due() {
-                format!("Enter/Esc:「{}」に追加 (日時の順に並ぶ。s で日時)  Ctrl+C:やめる", app.cur_q().label(app.kind))
             } else {
                 format!("Enter/Esc:「{}」の {} 番目に追加  Ctrl+C:やめる", app.cur_q().label(app.kind), at + 1)
             };

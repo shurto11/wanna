@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byDue, holds, label, QUADRANTS, type Want } from "./model.ts";
+import { dueIndex, holds, label, QUADRANTS, type Want } from "./model.ts";
 
 const mk = (title: string, pos: string, due_at: string | null, kind: Want["kind"] = "task"): Want => ({
   id: title,
@@ -18,18 +18,20 @@ const mk = (title: string, pos: string, due_at: string | null, kind: Want["kind"
   created_at: "2026-11-16T00:00:00Z",
 });
 
-test("Must は日時の順で、日時なしは最後 (core の sort_by_due と同じ)", () => {
+test("日時を入れる位置 (core の due_index と同じ)", () => {
+  // 手で並べた結果、日時の順になっていないところもある
   const ws = [
-    mk("none-a", "A", null),
-    mk("late", "B", "2026-12-01"),
-    mk("none-0", "0", null),
-    mk("timed", "C", "2026-11-25T12:00:00+09:00"),
-    mk("day", "D", "2026-11-20"),
+    mk("a", "A", "2026-11-20"),
+    mk("b", "B", null),
+    mk("c", "C", "2026-11-25T12:00:00+09:00"),
+    mk("d", "D", "2026-12-01"),
+    mk("e", "E", null),
   ];
-  assert.deepEqual(
-    ws.sort(byDue).map((w) => w.title),
-    ["day", "timed", "late", "none-0", "none-a"],
-  );
+  assert.equal(dueIndex(ws, "2026-11-01"), 0);
+  assert.equal(dueIndex(ws, "2026-11-21"), 2);
+  assert.equal(dueIndex(ws, "2026-11-26"), 3);
+  assert.equal(dueIndex(ws, "2027-01-01"), 4);
+  assert.equal(dueIndex([mk("x", "A", null), mk("y", "B", null)], "2026-11-20"), 0);
 });
 
 test("Must は clau度で分けず、学校 / その他 で表示する", () => {

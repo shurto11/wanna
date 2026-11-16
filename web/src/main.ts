@@ -9,8 +9,8 @@ import {
   QUADRANTS,
   axisLabel,
   axisValues,
-  byDue,
   byPos,
+  dueIndex,
   dueOf,
   hasDue,
   holds,
@@ -154,7 +154,7 @@ let dragging = false;
 // ───────── 区分 (リストごとに1枚) ─────────
 
 /** 1枚の面を組み立てる。Want は 2×2 で、区分の位置で軸がわかるので見出しは1列表示のときだけ出す。
- *  Must は学校の段を上、その他の段を下に重ね、段の中は日時の順に並べる (見出しを常に出す) */
+ *  Must は学校の段を上、その他の段を下に重ねる (見出しを常に出す) */
 function buildPlane(kind: Kind): HTMLOListElement[] {
   const grid = h("div", { class: "grid" });
   const plane = h("div", { class: splitsClau(kind) ? "plane" : "plane rows" });
@@ -205,8 +205,6 @@ function buildPlane(kind: Kind): HTMLOListElement[] {
     );
     Sortable.create(list, {
       group: kind,
-      // Must は日時の順に並ぶので、段の中では並べ替えない (段の間へは動かせる)
-      sort: !hasDue(kind),
       animation: 150,
       delay: 180,
       delayOnTouchOnly: true,
@@ -227,17 +225,15 @@ function buildPlane(kind: Kind): HTMLOListElement[] {
 
 const planes = new Map<Kind, HTMLOListElement[]>(KINDS.map((k) => [k, buildPlane(k)]));
 
-/** リスト・区分の中身。Want は pos の順、Must は日時の順 (日時なしは最後)。Must は clau度で分けない */
+/** リスト・区分の中身。pos の順。Must は clau度で分けないので縦軸 (学校 / その他) だけ見る */
 function listOf(kind: Kind, q: Quadrant, except?: string): Want[] {
   return [...store.wants.values()]
     .filter((w) => isActive(w) && w.kind === kind && holds(q, kind, w) && w.id !== except)
-    .sort(hasDue(kind) ? byDue : byPos);
+    .sort(byPos);
 }
 
-/** 区分の末尾に付ける pos。Must は日時の順に並ぶので、表示の最後ではなく一番大きい pos の後ろ */
 function tailPos(kind: Kind, q: Quadrant, except?: string): string {
-  const max = listOf(kind, q, except).reduce<string | null>((m, w) => (m === null || w.pos > m ? w.pos : m), null);
-  return between(max, null);
+  return between(listOf(kind, q, except).at(-1)?.pos ?? null, null);
 }
 
 function add(title: string, kind: Kind, q: Quadrant) {
@@ -266,18 +262,15 @@ function patch(id: string, p: WantPatch) {
 }
 
 /** id をリスト kind の区分 q の index 番目に置く。pos が重複して挟めなければ区分全体を振り直す。
- *  Must は日時の順に並ぶので、段だけ移して pos は末尾にする (clau度は持っている値のまま) */
+ *  Must は clau度で分けないので、段 (学校 / その他) だけ移して clau度は持っている値のまま */
 function place(id: string, kind: Kind, q: Quadrant, index: number) {
   const w = store.wants.get(id);
   if (!w) return;
-  if (hasDue(kind)) {
-    if (w.axis_hi !== q.axis_hi) patch(id, { axis_hi: q.axis_hi, pos: tailPos(kind, q, id) });
-    return;
-  }
   const others = listOf(kind, q, id);
   const a = others[index - 1]?.pos ?? null;
   const b = others[index]?.pos ?? null;
-  const moveQ: WantPatch = sameQuadrant(w, q) ? {} : { axis_hi: q.axis_hi, clau: q.clau };
+  const moveQ: WantPatch =
+    w.kind === kind && holds(q, kind, w) ? {} : splitsClau(kind) ? { axis_hi: q.axis_hi, clau: q.clau } : { axis_hi: q.axis_hi };
   if (a === null || b === null || a < b) {
     patch(id, { ...moveQ, pos: between(a, b) });
     return;
@@ -618,10 +611,15 @@ edForm.addEventListener("submit", (e) => {
   if (notes !== w.notes) p.notes = notes;
   // Must では clau度の欄を出さないので、持っている値のまま
   const q = { axis_hi: f.axis_hi.value === "1", clau: splitsClau(kind) ? f.clau.value === "1" : w.clau };
-  if (kind !== w.kind || !sameQuadrant(w, q))
-    Object.assign(p, { kind, ...q, pos: tailPos(kind, q, w.id) });
+  const moved = kind !== w.kind || !sameQuadrant(w, q);
+  if (moved) Object.assign(p, { kind, ...q, pos: tailPos(kind, q, w.id) });
   if (dueAt !== (w.due_at ?? null)) p.due_at = dueAt;
   if (Object.keys(p).length > 0) patch(w.id, p);
+  // 日時を入れた・変えたとき、日時のあるものの段を移したときは、段の中の日時の位置へ (TUI と同じ)
+  if (dueAt !== null && (moved || "due_at" in p)) {
+    const index = dueIndex(listOf(kind, q, w.id), dueAt);
+    if (listOf(kind, q).findIndex((x) => x.id === w.id) !== index) place(w.id, kind, q, index);
+  }
 });
 
 editor.addEventListener("close", () => {

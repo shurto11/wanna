@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use wanna_core::client::{Client, Conflict};
-use wanna_core::{due, notes, Kind, Quadrant, Want, WantPatch};
+use wanna_core::{due, due_index, notes, pos, sort_by_pos, Kind, Quadrant, Want, WantPatch};
 
 const USAGE: &str = "\
 使い方: wanna <コマンド> ...   (引数なしで TUI)
@@ -143,7 +143,12 @@ pub fn run(args: &[String]) -> Result<()> {
             } else {
                 due::parse_input(&input.join(" "), chrono::Local::now().naive_local()).map_err(anyhow::Error::msg)?
             };
-            let p = WantPatch { due_at: Some(due_at), ..Default::default() };
+            // 日時を入れたら、TUI と同じく段の中の日時の位置へ
+            let pos = match &due_at {
+                Some(d) => pos_by_due(&c, &w, d)?,
+                None => None,
+            };
+            let p = WantPatch { due_at: Some(due_at), pos, ..Default::default() };
             let w = c.patch(&w.id, &p)?;
             println!("日時: {}  {}", w.due().unwrap_or("なし"), w.title);
             Ok(())
@@ -227,6 +232,20 @@ fn all(c: &Client) -> Result<Vec<Want>> {
     Ok(c.sync(None)?.wants.into_iter().filter(|w| !w.deleted).collect())
 }
 
+/// `w` を日時 `due` で段 (区分) に入れるときの pos (`due_index` の位置)。
+/// 前後の pos が重複していて挟めなければ None (サーバーが末尾に付ける)
+fn pos_by_due(c: &Client, w: &Want, due: &str) -> Result<Option<String>> {
+    let q = w.quadrant();
+    let ws = all(c)?;
+    let mut list: Vec<&Want> =
+        ws.iter().filter(|x| x.is_active() && x.kind == w.kind && x.id != w.id && q.holds(x)).collect();
+    sort_by_pos(&mut list);
+    let i = due_index(&list, due);
+    let a = i.checked_sub(1).map(|i| list[i].pos.as_str());
+    let b = list.get(i).map(|x| x.pos.as_str());
+    Ok(a.zip(b).is_none_or(|(a, b)| a < b).then(|| pos::between(a, b)))
+}
+
 /// 表示用の短い ID。UUIDv7 の先頭は時刻で揃いやすいので末尾を使う
 fn short(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
@@ -285,11 +304,10 @@ fn ls(c: &Client, want: bool, must: bool, shelf: Shelf, json: bool) -> Result<()
             _ => true,
         })
         .collect();
-    // リスト → 区分 (画面の並び) → 区分内の並び (Must は日時の順で日時なしは最後。Want は日時を持たない)
+    // リスト → 区分 (画面の並び) → 区分内の並び。Must は clau度で分けないので縦軸だけで区分を見る
     ws.sort_by_cached_key(|w| {
         let q = Quadrant::ALL.iter().position(|q| q.holds(w));
-        let at = w.due().and_then(due::at);
-        (w.kind.index(), q, at.is_none(), at, w.pos.clone(), w.id.clone())
+        (w.kind.index(), q, w.pos.clone(), w.id.clone())
     });
     if json {
         println!("{}", serde_json::to_string_pretty(&ws)?);
@@ -360,9 +378,12 @@ fn new(
     due_at: Option<String>,
     and_link: bool,
 ) -> Result<()> {
-    // pos を空で送るとサーバーが区分の末尾に付ける
+    // pos を空で送るとサーバーが区分の末尾に付ける。日時があれば TUI と同じく段の中の日時の位置へ
     let mut w = Want::new(title, kind, axis_hi, clau, String::new());
     w.notes = notes::template();
+    if let Some(d) = &due_at {
+        w.pos = pos_by_due(c, &w, d)?.unwrap_or_default();
+    }
     w.due_at = due_at;
     let w = c.create(&w)?;
     let due = w.due().unwrap_or("");
